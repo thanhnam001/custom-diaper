@@ -19,6 +19,7 @@ from infer import (
 )
 from os.path import join
 from pathlib import Path
+from tqdm import tqdm
 # from safe_gpu import safe_gpu
 from scipy.signal import medfilt
 from torch.utils.data import DataLoader
@@ -197,7 +198,7 @@ def parse_arguments() -> InferenceArgs:
     parser.add_argument('--use-pre-crossattention', default=False, type=bool)
     parser.add_argument('--vad-loss-weight', default=0.0, type=float)
     parser.add_argument('--wav-dir', required=True, type=str)
-    parser.add_argument('--wav-name', required=True, type=str)
+    parser.add_argument('--wav-name', required=False, type=str)
     args = parser.parse_args()
     return args
 
@@ -253,85 +254,93 @@ if __name__ == '__main__':
         f"subsampling{args.subsampling}",
         "rttms"
     )
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    wav_dir = Path(args.wav_dir)
+    if wav_dir.is_dir() and args.wav_name is not None:
+        filepaths = [wav_dir / f"{args.wav_name}.wav"]
+    else:
+        filepaths = list(Path(wav_dir).rglob('*.wav'))
+    print('Total file', len(filepaths))
+    for filepath in tqdm(filepaths):
+        duration = librosa.get_duration(filename=filepath)
+        # duration = min(duration, 60.0)
+        # 100 frames per second, because later we will multiply with args.frame_shift=160, meaning 0.1s in 16kHz
+        # and we want to have 100 frames per second in the plot
+        file_frames_length = int((100*duration) // 1) 
+        data, samplerate = sf.read(
+            filepath, start=0, stop=(file_frames_length * args.frame_shift))
+        Y = stft(data, args.frame_size, args.frame_shift)
+        Y = transform(
+            Y, args.sampling_rate, args.feature_dim, args.input_transform, False) 
+        Y_spliced = splice(Y, args.context_size)
+        Y_ss, _ = subsample(Y_spliced, Y_spliced, args.subsampling)
 
-    filepath = os.path.join(args.wav_dir, f"{args.wav_name}.wav")
-    duration = librosa.get_duration(filename=filepath)
-    duration = min(duration, 60.0)
-    # 100 frames per second, because later we will multiply with args.frame_shift=160, meaning 0.1s in 16kHz
-    # and we want to have 100 frames per second in the plot
-    file_frames_length = int((100*duration) // 1) 
-    data, samplerate = sf.read(
-        filepath, start=0, stop=(file_frames_length * args.frame_shift))
-    Y = stft(data, args.frame_size, args.frame_shift)
-    Y = transform(
-        Y, args.sampling_rate, args.feature_dim, args.input_transform, False) 
-    Y_spliced = splice(Y, args.context_size)
-    Y_ss, _ = subsample(Y_spliced, Y_spliced, args.subsampling)
-
-    input = torch.from_numpy(np.asarray([Y_ss])).to(args.device)
-    with torch.no_grad():
-        (
-            y_pred,
-            existence_probs,
-            per_prcvblock_latents,
-            per_prcvblock_attractors,
-            y_probs
-        ) = estimate_diarization_outputs(model, input, args)
-    # Each one has a single sequence
-    y_pred = y_pred[0]
-    existence_probs = existence_probs[0]
-    y_probs = y_probs[0]
-    # first attractor and latent -> why not all of them?
-    per_prcvblock_attractors = torch.stack([a[0] for a in per_prcvblock_attractors]) # (B, d_latents, n_blocks)
-    per_prcvblock_latents = torch.stack([lat[0] for lat in per_prcvblock_latents]) # (B, d_latents, n_blocks)
-    post_y = postprocess_output(
-        y_pred, args.subsampling,
-        args.threshold, args.median_window_length,
-        args.normalize_probs)
-    rttm_filename = join(out_dir, f"{args.wav_name}.rttm")
-    with open(rttm_filename, 'w') as rttm_file:
-        hard_labels_to_rttm(post_y, args.wav_name, rttm_file)
-    if args.plot_output:
-        fig, axs = plt.subplots(y_probs.shape[1]+1)
-        fig.set_figwidth(y_probs.shape[0]/100)
-        for i in range(y_probs.shape[1]):
-            y_probs_extended = y_probs[:, i].repeat_interleave(args.subsampling)
-            y_probs_postprocessed = postprocess_output(
-                y_probs[:, i].unsqueeze(1),
-                args.subsampling, args.threshold,
-                args.median_window_length, args.normalize_probs)
-            axs[i].set_ylim([-0.1, 1.1])
-            axs[i].set_xticks([])
-            axs[i].plot(range(
-                y_probs_extended.shape[0]), y_probs_extended, linewidth=0.5)
-            axs[i].plot(range(
-                y_probs_postprocessed.shape[0]),
-                y_probs_postprocessed, 'r', linewidth=0.2)
-            axs[i].title.set_text('{:.20f}'.format(existence_probs[i].item()))
-            axs[i].title.set_size(6)
+        input = torch.from_numpy(np.asarray([Y_ss])).to(args.device)
+        with torch.no_grad():
+            (
+                y_pred,
+                existence_probs,
+                per_prcvblock_latents,
+                per_prcvblock_attractors,
+                y_probs
+            ) = estimate_diarization_outputs(model, input, args)
+        # Each one has a single sequence
+        y_pred = y_pred[0]
+        existence_probs = existence_probs[0]
+        y_probs = y_probs[0]
+        # first attractor and latent -> why not all of them?
+        per_prcvblock_attractors = torch.stack([a[0] for a in per_prcvblock_attractors]) # (B, d_latents, n_blocks)
+        per_prcvblock_latents = torch.stack([lat[0] for lat in per_prcvblock_latents]) # (B, d_latents, n_blocks)
+        post_y = postprocess_output(
+            y_pred, args.subsampling,
+            args.threshold, args.median_window_length,
+            args.normalize_probs)
+        #  rttm_filename = join(out_dir, f"{args.wav_name}.rttm")
+        rttm_filename = out_dir / filepath.with_suffix('.rttm').name
+        wav_name = filepath.stem
+        with open(rttm_filename, 'w') as rttm_file:
+            hard_labels_to_rttm(post_y, wav_name, rttm_file)
+        if args.plot_output:
+            fig, axs = plt.subplots(y_probs.shape[1]+1)
+            fig.set_figwidth(y_probs.shape[0]/100)
+            for i in range(y_probs.shape[1]):
+                y_probs_extended = y_probs[:, i].repeat_interleave(args.subsampling)
+                y_probs_postprocessed = postprocess_output(
+                    y_probs[:, i].unsqueeze(1),
+                    args.subsampling, args.threshold,
+                    args.median_window_length, args.normalize_probs)
+                axs[i].set_ylim([-0.1, 1.1])
+                axs[i].set_xticks([])
+                axs[i].plot(range(
+                    y_probs_extended.shape[0]), y_probs_extended, linewidth=0.5)
+                axs[i].plot(range(
+                    y_probs_postprocessed.shape[0]),
+                    y_probs_postprocessed, 'r', linewidth=0.2)
+                axs[i].title.set_text('{:.20f}'.format(existence_probs[i].item()))
+                axs[i].title.set_size(6)
+                for j in range(0, y_probs_extended.shape[0], 100):
+                    axs[i].axvline(
+                        x=j, ymin=-0.5, ymax=1.5, c='black',
+                        lw=0.25, ls=':', clip_on=False)
+            if args.ref_rttms_dir:
+                ref_frames, ref_spks = rttm_to_hard_labels(
+                    join(args.ref_rttms_dir, f"{wav_name}.rttm"), 100)
+            for i in range(ref_frames.shape[1]):
+                axs[y_probs.shape[1]].set_ylim([-0.1, 1.1])
+                axs[y_probs.shape[1]].plot(
+                    range(ref_frames.shape[0]),
+                    (1-0.1*i)*ref_frames[:, i], linewidth=0.5)
+            axs[y_probs.shape[1]].title.set_text('Reference')
+            axs[y_probs.shape[1]].title.set_size(6)
             for j in range(0, y_probs_extended.shape[0], 100):
-                axs[i].axvline(
+                axs[y_probs.shape[1]].axvline(
                     x=j, ymin=-0.5, ymax=1.5, c='black',
                     lw=0.25, ls=':', clip_on=False)
-        if args.ref_rttms_dir:
-            ref_frames, ref_spks = rttm_to_hard_labels(
-                join(args.ref_rttms_dir, f"{args.wav_name}.rttm"), 100)
-        for i in range(ref_frames.shape[1]):
-            axs[y_probs.shape[1]].set_ylim([-0.1, 1.1])
-            axs[y_probs.shape[1]].plot(
-                range(ref_frames.shape[0]),
-                (1-0.1*i)*ref_frames[:, i], linewidth=0.5)
-        axs[y_probs.shape[1]].title.set_text('Reference')
-        axs[y_probs.shape[1]].title.set_size(6)
-        for j in range(0, y_probs_extended.shape[0], 100):
-            axs[y_probs.shape[1]].axvline(
-                x=j, ymin=-0.5, ymax=1.5, c='black',
-                lw=0.25, ls=':', clip_on=False)
-        plt.subplots_adjust(hspace=1)
-        png_filename = join(out_dir, f"{args.wav_name}.png")
-        fig.savefig(png_filename, dpi=300)
-        plt.figure().clear()
-        plt.close()
-        plt.cla()
-        plt.clf()
+            plt.subplots_adjust(hspace=1)
+            png_filename = join(out_dir, f"{wav_name}.png")
+            fig.savefig(png_filename, dpi=300)
+            plt.figure().clear()
+            plt.close()
+            plt.cla()
+            plt.clf()

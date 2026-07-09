@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from train import _convert
 from types import SimpleNamespace
 from typing import List, TextIO, Tuple
-# from safe_gpu import safe_gpu
+from safe_gpu import safe_gpu
 from scipy.signal import medfilt
 import h5py
 import logging
@@ -359,7 +359,7 @@ if __name__ == '__main__':
     infer_loader = get_infer_dataloader(args)
 
     if args.gpu >= 1:
-        # safe_gpu.claim_gpus(nb_gpus=args.gpu)
+        safe_gpu.claim_gpus(nb_gpus=args.gpu)
         args.device = torch.device("cuda")
     else:
         args.device = torch.device("cpu")
@@ -395,29 +395,34 @@ if __name__ == '__main__':
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     for i, batch in enumerate(infer_loader):
-        input = torch.stack(batch['xs']).to(args.device)
-        name = batch['names'][0]
-        with torch.no_grad():
-            (
-                y_pred,
-                existence_probs,
-                per_prcvblock_latents,
-                per_prcvblock_attractors,
-                y_probs
-            ) = estimate_diarization_outputs(model, input, args)
-        # Each one has a single sequence
-        y_pred = y_pred[0]
-        existence_probs = existence_probs[0]
-        y_probs = y_probs[0]
-        per_prcvblock_attractors = torch.stack([a[0] for a in per_prcvblock_attractors])
-        per_prcvblock_latents = torch.stack([lat[0] for lat in per_prcvblock_latents])
-        post_y = postprocess_output(
-            y_pred, args.subsampling,
-            args.threshold, args.median_window_length,
-            args.normalize_probs)
-        rttm_filename = join(out_dir, f"{name}.rttm")
-        with open(rttm_filename, 'w', encoding='UTF-8') as rttm_file:
-            hard_labels_to_rttm(post_y, name, rttm_file)
+        print(f'Done sample {i}')
+        try:
+            input = torch.stack(batch['xs']).to(args.device)
+            name = batch['names'][0]
+            with torch.no_grad():
+                (
+                    y_pred,
+                    existence_probs,
+                    per_prcvblock_latents,
+                    per_prcvblock_attractors,
+                    y_probs
+                ) = estimate_diarization_outputs(model, input, args)
+            # Each one has a single sequence
+            y_pred = y_pred[0]
+            existence_probs = existence_probs[0]
+            y_probs = y_probs[0]
+            per_prcvblock_attractors = torch.stack([a[0] for a in per_prcvblock_attractors])
+            per_prcvblock_latents = torch.stack([lat[0] for lat in per_prcvblock_latents])
+            post_y = postprocess_output(
+                y_pred, args.subsampling,
+                args.threshold, args.median_window_length,
+                args.normalize_probs)
+            rttm_filename = join(out_dir, f"{name}.rttm")
+            with open(rttm_filename, 'w', encoding='UTF-8') as rttm_file:
+                hard_labels_to_rttm(post_y, name, rttm_file)
+            torch.cuda.empty_cache()
+        except:
+            print(name)
         if args.plot_output:
             fig, axs = plt.subplots(y_probs.shape[1]+1)
             fig.set_figwidth(y_probs.shape[0]/100)

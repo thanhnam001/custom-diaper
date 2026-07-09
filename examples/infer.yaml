@@ -4,7 +4,8 @@ context_size: 7
 d_latents: 128
 dropout_attractors: 0.1
 dropout_frames: 0.1
-epochs: <checkpoints to average, for example 65-75>
+# epochs: <checkpoints to average, for example 65-75>
+epochs: 91-100
 estimate_spk_qty: -1
 estimate_spk_qty_thr: 0.5
 feature_dim: 23
@@ -19,7 +20,8 @@ input_transform: logmel_meannorm
 latents2attractors: weighted_average
 median_window_length: 11
 model_type: AttractorPerceiver
-models_path: <directory with checkpoints>
+# models_path: <directory with checkpoints>
+models_path: ./models/10attractors/SC_LibriSpeech_2spk_adapted1-10_retrain100h
 n_attractors: 10
 n_blocks_attractors: 3
 n_internal_blocks_attractors: 1
@@ -29,10 +31,11 @@ n_sa_heads_attractors: 4
 n_xa_heads_attractors: 4
 num_frames: -1
 pre_xa_heads: 4
-rttms_dir: <output RTTMs directory>
+# rttms_dir: <output RTTMs directory>
+rttms_dir: ./output_retrain_SC_LibriSpeech_100h
 sampling_rate: 8000
 seed: 3
-subsampling: 10
+subsampling: 5
 time_shuffle: False
 threshold: 0.5
 use_frame_selfattention: True

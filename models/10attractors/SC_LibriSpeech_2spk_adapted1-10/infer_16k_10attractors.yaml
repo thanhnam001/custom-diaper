@@ -35,7 +35,8 @@ num_frames: -1
 pre_xa_heads: 4
 # rttms_dir: <your path>/DiaPer/examples/10att_withoutFT
 # rttms_dir: ./output_retrain_SC_LibriSpeech_100h/voxconverse_test
-rttm_dir: ./models/10attractors/SC_LibriSpeech_2spk_adapted1-10_300h_maximum5spks/voxconverse_test_pred
+# rttms_dir: ./models/10attractors/SC_LibriSpeech_2spk_adapted1-10_300h_maximum5spks/voxconverse_test_pred
+rttms_dir: ./models/10attractors/SC_LibriSpeech_2spk_adapted1-10_300h_maximum5spks/ramc_test_pred
 sampling_rate: 16000
 seed: 3
 subsampling: 5

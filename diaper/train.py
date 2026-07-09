@@ -4,6 +4,14 @@
 # Copyright 2023 Brno University of Technology (author: Federico Landini)
 # Licensed under the MIT license.
 
+import os
+#  MAX_THREADS = '1'
+#  os.environ['OMP_NUM_THREADS'] = MAX_THREADS
+#  os.environ['MKL_NUM_THREADS'] = MAX_THREADS
+#  os.environ['OPENBLAS_NUM_THREADS'] = MAX_THREADS
+#  os.environ['VECLIB_MAXIMUM_THREADS'] = MAX_THREADS
+#  os.environ['NUMEXPR_NUM_THREADS'] = MAX_THREADS
+
 from backend.losses import (
     get_loss,
     pad_labels_zeros,
@@ -32,16 +40,23 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 import logging
 import numpy as np
-import os
 import random
 import torch
 import yamlargparse
+from tqdm import tqdm
 
+#  torch.set_num_threads(1)
+#  torch.set_num_interop_threads(1)
 
 def _init_fn(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+    #  torch.set_num_threads(1)
+    #  threads = '1'
+    #  os.environ['OMP_NUM_THREADS'] = threads
+    #  os.environ['MKL_NUM_THREADS'] = threads
+    #  os.environ['OPENBLAS_NUM_THREADS'] = threads
 
 
 def _convert(
@@ -544,7 +559,8 @@ if __name__ == '__main__':
 
     for epoch in range(int(round(init_epoch)), args.max_epochs):
         model.train()
-        for i, batch in enumerate(train_loader):
+        for i, batch in enumerate(tqdm(train_loader,
+                                       total=len(train_loader))):
             train_batches_qty += 1
             features = batch['xs']
             labels = batch['ts']
@@ -585,7 +601,7 @@ if __name__ == '__main__':
         dev_batches_qty = 0
         with torch.no_grad():
             model.eval()
-            for i, batch in enumerate(dev_loader):
+            for i, batch in enumerate(tqdm(dev_loader, total=len(dev_loader))):
                 dev_batches_qty += 1
                 features = batch['xs']
                 labels = batch['ts']
@@ -606,3 +622,4 @@ if __name__ == '__main__':
                 f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
                 epoch * dev_batches_qty + i)
         acum_dev_metrics = reset_metrics(acum_dev_metrics)
+        print(f'Done epoch {epoch + 1}/{args.max_epochs}')
