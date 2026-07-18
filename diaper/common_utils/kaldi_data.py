@@ -39,13 +39,55 @@ def load_segments_rechash(segments_file: str) -> Dict[str, Dict[str, Any]]:
     return ret
 
 
-def load_wav_scp(wav_scp_file: str) -> Dict[str, str]:
-    """ return dictionary { rec: wav_rxfilename } """
+def load_wav_scp(
+    wav_scp_file: str, 
+    replace_root: tuple[str, str] | None = None,
+    base_dir: str | None = None,
+    expand_vars: bool = True
+) -> dict[str, str]:
+    """ 
+    Return dictionary { rec: wav_rxfilename }
+    
+    Args:
+        wav_scp_file: Path to wav.scp file
+        replace_root: Tuple of (old_root, new_root) to replace paths
+        base_dir: Base directory for relative paths. If None, uses wav.scp directory
+        expand_vars: Whether to expand environment variables (e.g., $HOME, %USERPROFILE%)
+    """
+    if base_dir is None:
+        base_dir = os.path.dirname(os.path.abspath(wav_scp_file))
+    
     lines = [line.strip().split(None, 1) for line in open(wav_scp_file)]
-    return {x[0]: x[1].replace(
-        '/mnt/d/Python/Master/database',
-        '/data/ocr/namvt17/custom-diaper') for x in lines}
-
+    
+    result = {}
+    for rec_id, wav_path in lines:
+        # Expand environment variables
+        if expand_vars:
+            wav_path = os.path.expandvars(os.path.expanduser(wav_path))
+        
+        # Handle replace_root
+        if replace_root is not None:
+            wav_path = wav_path.replace(replace_root[0], replace_root[1])
+        
+        # Normalize path separators to handle mixed separators (e.g., '../a\b')
+        # Replace all backslashes with forward slashes first, then let normpath handle it
+        if not wav_path.endswith('|') and wav_path != '-':
+            wav_path = wav_path.replace('\\', '/')
+        
+        # Convert relative paths to absolute
+        # Skip pipe commands (ending with |) and stdin (-)
+        if not wav_path.endswith('|') and wav_path != '-':
+            if not os.path.isabs(wav_path):
+                # Use normpath to properly resolve '..' and '.' in paths
+                # This handles cases like '../a/b' correctly when joined with absolute paths
+                wav_path = os.path.normpath(os.path.join(base_dir, wav_path))
+            else:
+                # Even for absolute paths, normalize to resolve any '..' or '.'
+                wav_path = os.path.normpath(wav_path)
+        
+        result[rec_id] = wav_path
+    
+    return result
 
 @lru_cache(maxsize=1)
 def load_wav(

@@ -80,8 +80,9 @@ def pad_sequence(
             labels_padded.append(torch.cat((labels[i], -torch.ones((
                 extend, labels[i].shape[1]))), dim=0))
         elif length > seq_len:
-            raise (f"Sequence of length {length} was received but only "
-                   "{seq_len} was expected.")
+            raise ValueError(
+                f"Sequence of length {length} was received but only "
+                f"{seq_len} was expected.")
         else:
             features_padded.append(features[i])
             labels_padded.append(labels[i])

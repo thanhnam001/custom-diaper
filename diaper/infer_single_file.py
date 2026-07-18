@@ -47,6 +47,7 @@ class InferenceArgs:
     att_qty_loss_weight: float
     att_qty_reg_loss_weight: float
     condition_frame_encoder: bool
+    conformer_conv_kernel_size: int
     context_activations: bool
     context_size: int
     d_latents: int
@@ -60,6 +61,7 @@ class InferenceArgs:
     frame_encoder_heads: int
     frame_encoder_layers: int
     frame_encoder_units: int
+    frame_encoder_type: str
     frame_size: int
     frame_shift: int
     gpu: int
@@ -115,6 +117,9 @@ def parse_arguments() -> InferenceArgs:
     parser.add_argument('--att-qty-loss-weight', default=0.0, type=float)
     parser.add_argument('--att-qty-reg-loss-weight', default=0.0, type=float)
     parser.add_argument('--condition-frame-encoder', type=bool, default=True)
+    parser.add_argument('--conformer-conv-kernel-size', default=31, type=int,
+                        help='depthwise-conv kernel size for the conformer '
+                        'frame encoder (must be odd)')
     parser.add_argument('--context-activations', type=bool, default=False)
     parser.add_argument('--context-size', type=int)
     parser.add_argument('--d-latents', type=int,
@@ -134,6 +139,9 @@ def parse_arguments() -> InferenceArgs:
     parser.add_argument('--frame-encoder-heads', type=int)
     parser.add_argument('--frame-encoder-layers', type=int)
     parser.add_argument('--frame-encoder-units', type=int)
+    parser.add_argument('--frame-encoder-type', default='self_attention',
+                        type=str, choices=['self_attention', 'conformer'],
+                        help='block type used inside the frame encoder loop')
     parser.add_argument('--frame-size', type=int)
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--gpu', '-g', default=-1, type=int,

@@ -358,6 +358,9 @@ def parse_arguments() -> SimpleNamespace:
                         help='how are attractors and frame embeddings compared')
     parser.add_argument('--att-qty-loss-weight', default=0.0, type=float)
     parser.add_argument('--condition-frame-encoder', type=bool, default=True)
+    parser.add_argument('--conformer-conv-kernel-size', default=31, type=int,
+                        help='depthwise-conv kernel size for the conformer '
+                        'frame encoder (must be odd)')
     parser.add_argument('--context-activations', type=bool, default=False)
     parser.add_argument('--context-size', type=int)
     parser.add_argument('--d-latents', type=int, default=None,
@@ -376,6 +379,9 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--frame-encoder-heads', type=int)
     parser.add_argument('--frame-encoder-layers', type=int)
     parser.add_argument('--frame-encoder-units', type=int)
+    parser.add_argument('--frame-encoder-type', default='self_attention',
+                        type=str, choices=['self_attention', 'conformer'],
+                        help='block type used inside the frame encoder loop')
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--frame-size', type=int)
     parser.add_argument('--gpu', '-g', default=-1, type=int,

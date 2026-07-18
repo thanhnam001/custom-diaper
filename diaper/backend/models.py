@@ -250,6 +250,109 @@ class PositionwiseFeedForward(torch.nn.Module):
                                       self.dropout, training=self.training))
 
 
+class ConvolutionModule(torch.nn.Module):
+    """ Conformer convolution module: pointwise conv -> GLU -> depthwise
+    conv -> batchnorm -> SiLU -> pointwise conv.
+
+    Note: like the rest of the model, this does not mask out padded frames
+    (see backend/losses.py::pad_sequence, which fills padding with -1) --
+    the depthwise conv will locally mix a few padded frames into valid ones
+    within kernel_size // 2 positions of the true/padding boundary, the same
+    class of limitation as the model's existing unmasked self-attention.
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        d_latents: int,
+        kernel_size: int,
+        dropout: float,
+    ) -> None:
+        super(ConvolutionModule, self).__init__()
+        assert kernel_size % 2 == 1, \
+            f"kernel_size must be odd for symmetric padding, got {kernel_size}"
+        self.device = device
+        self.dropout = dropout
+        self.layer_norm = torch.nn.LayerNorm(d_latents, device=self.device)
+        self.pointwise_conv1 = torch.nn.Conv1d(
+            d_latents, 2 * d_latents, kernel_size=1, device=self.device)
+        self.depthwise_conv = torch.nn.Conv1d(
+            d_latents, d_latents, kernel_size=kernel_size,
+            padding=(kernel_size - 1) // 2, groups=d_latents,
+            device=self.device)
+        self.batch_norm = torch.nn.BatchNorm1d(d_latents, device=self.device)
+        self.pointwise_conv2 = torch.nn.Conv1d(
+            d_latents, d_latents, kernel_size=1, device=self.device)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, F)
+        x = self.layer_norm(x)
+        x = x.transpose(1, 2)  # (B, F, T)
+        x = self.pointwise_conv1(x)  # (B, 2F, T)
+        x = F.glu(x, dim=1)  # (B, F, T)
+        x = self.depthwise_conv(x)  # (B, F, T)
+        x = self.batch_norm(x)
+        x = F.silu(x)
+        x = self.pointwise_conv2(x)  # (B, F, T)
+        x = F.dropout(x, self.dropout, training=self.training)
+        return x.transpose(1, 2)  # (B, T, F)
+
+
+class ConformerBlock(torch.nn.Module):
+    """ Conformer block used as a drop-in replacement for the vanilla
+    self-attention + FFN frame-encoder block. Uses the same flattened
+    (BT, F) + batch_size calling convention as MultiHeadSelfAttention so it
+    plugs into AttractorPerceiver's per-layer loop unchanged. Reuses the
+    existing MultiHeadSelfAttention (absolute positions) rather than a full
+    Transformer-XL-style relative positional attention.
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        d_latents: int,
+        n_heads: int,
+        d_units: int,
+        kernel_size: int,
+        dropout: float,
+    ) -> None:
+        super(ConformerBlock, self).__init__()
+        self.device = device
+        self.dropout = dropout
+        self.ff1_lnorm = torch.nn.LayerNorm(d_latents, device=self.device)
+        self.ff1 = PositionwiseFeedForward(
+            self.device, d_latents, d_units, dropout)
+        self.mhsa_lnorm = torch.nn.LayerNorm(d_latents, device=self.device)
+        self.mhsa = MultiHeadSelfAttention(
+            self.device, d_latents, n_heads, dropout)
+        self.conv_module = ConvolutionModule(
+            self.device, d_latents, kernel_size, dropout)
+        self.ff2_lnorm = torch.nn.LayerNorm(d_latents, device=self.device)
+        self.ff2 = PositionwiseFeedForward(
+            self.device, d_latents, d_units, dropout)
+        self.final_lnorm = torch.nn.LayerNorm(d_latents, device=self.device)
+
+    def __call__(self, x: torch.Tensor, batch_size: int) -> torch.Tensor:
+        # x: (BT, F)
+        x = x + 0.5 * F.dropout(
+            self.ff1(self.ff1_lnorm(x)), self.dropout, training=self.training)
+        x = x + F.dropout(
+            self.mhsa(self.mhsa_lnorm(x), batch_size),
+            self.dropout, training=self.training)
+        feat_dim = x.shape[-1]
+        seq_len = x.shape[0] // batch_size
+        x_bt = x.reshape(batch_size, seq_len, feat_dim)  # (B, T, F)
+        conv_out = self.conv_module(x_bt)
+        assert conv_out.shape[1] == seq_len, \
+            f"ConvolutionModule must preserve sequence length, got " \
+            f"{seq_len} -> {conv_out.shape[1]} (check stride/padding)"
+        x_bt = x_bt + conv_out
+        x = x_bt.reshape(-1, feat_dim)  # (BT, F)
+        x = x + 0.5 * F.dropout(
+            self.ff2(self.ff2_lnorm(x)), self.dropout, training=self.training)
+        return self.final_lnorm(x)
+
+
 class PerceiverBlock(torch.nn.Module):
 
     def __init__(
@@ -361,6 +464,9 @@ class AttractorPerceiver(torch.nn.Module):
         else:
             self.pre_crossattention = None
         self.use_frame_selfattention = args.use_frame_selfattention
+        assert args.frame_encoder_type != 'conformer' or \
+            self.use_frame_selfattention, \
+            "frame_encoder_type='conformer' requires use_frame_selfattention=True"
         if self.use_frame_selfattention:
             self.linear_in = torch.nn.Linear(
                 args.in_size, args.d_latents, device=self.device)
@@ -368,31 +474,43 @@ class AttractorPerceiver(torch.nn.Module):
                 args.d_latents, device=self.device)
             self.n_layers = args.frame_encoder_layers
             self.dropout = args.dropout_frames
+            self.frame_encoder_type = args.frame_encoder_type
             for i in range(self.n_layers):
-                setattr(
-                    self,
-                    '{}{:d}'.format("lnorm1_", i),
-                    torch.nn.LayerNorm(args.d_latents, device=self.device)
-                )
-                setattr(
-                    self,
-                    '{}{:d}'.format("self_att_", i),
-                    MultiHeadSelfAttention(self.device, args.d_latents,
-                                           args.frame_encoder_heads,
-                                           args.dropout_frames)
-                )
-                setattr(
-                    self,
-                    '{}{:d}'.format("lnorm2_", i),
-                    torch.nn.LayerNorm(args.d_latents, device=self.device)
-                )
-                setattr(
-                    self,
-                    '{}{:d}'.format("ff_", i),
-                    PositionwiseFeedForward(self.device, args.d_latents,
-                                            args.frame_encoder_units,
-                                            args.dropout_frames)
-                )
+                if self.frame_encoder_type == 'conformer':
+                    setattr(
+                        self,
+                        '{}{:d}'.format("conformer_", i),
+                        ConformerBlock(self.device, args.d_latents,
+                                       args.frame_encoder_heads,
+                                       args.frame_encoder_units,
+                                       args.conformer_conv_kernel_size,
+                                       args.dropout_frames)
+                    )
+                else:
+                    setattr(
+                        self,
+                        '{}{:d}'.format("lnorm1_", i),
+                        torch.nn.LayerNorm(args.d_latents, device=self.device)
+                    )
+                    setattr(
+                        self,
+                        '{}{:d}'.format("self_att_", i),
+                        MultiHeadSelfAttention(self.device, args.d_latents,
+                                               args.frame_encoder_heads,
+                                               args.dropout_frames)
+                    )
+                    setattr(
+                        self,
+                        '{}{:d}'.format("lnorm2_", i),
+                        torch.nn.LayerNorm(args.d_latents, device=self.device)
+                    )
+                    setattr(
+                        self,
+                        '{}{:d}'.format("ff_", i),
+                        PositionwiseFeedForward(self.device, args.d_latents,
+                                                args.frame_encoder_units,
+                                                args.dropout_frames)
+                    )
             self.lnorm_out = torch.nn.LayerNorm(
                 args.d_latents, device=self.device)
             self.condition_frame_encoder = args.condition_frame_encoder
@@ -501,18 +619,22 @@ class AttractorPerceiver(torch.nn.Module):
         e = self.linear_in(inputs.reshape(BT_size, -1))
         # Encoder stack
         for i in range(self.n_layers):
-            # layer normalization
-            e = getattr(self, '{}{:d}'.format("lnorm1_", i))(e)
-            # self-attention
-            s = getattr(self, '{}{:d}'.format("self_att_", i))(e, inputs.shape[0])
-            # residual
-            e = e + F.dropout(s, self.dropout, training=self.training)
-            # layer normalization
-            e = getattr(self, '{}{:d}'.format("lnorm2_", i))(e)
-            # positionwise feed-forward
-            s = getattr(self, '{}{:d}'.format("ff_", i))(e)
-            # residual
-            e = e + F.dropout(s, self.dropout, training=self.training)
+            if self.frame_encoder_type == 'conformer':
+                e = getattr(self, '{}{:d}'.format("conformer_", i))(
+                    e, inputs.shape[0])
+            else:
+                # layer normalization
+                e = getattr(self, '{}{:d}'.format("lnorm1_", i))(e)
+                # self-attention
+                s = getattr(self, '{}{:d}'.format("self_att_", i))(e, inputs.shape[0])
+                # residual
+                e = e + F.dropout(s, self.dropout, training=self.training)
+                # layer normalization
+                e = getattr(self, '{}{:d}'.format("lnorm2_", i))(e)
+                # positionwise feed-forward
+                s = getattr(self, '{}{:d}'.format("ff_", i))(e)
+                # residual
+                e = e + F.dropout(s, self.dropout, training=self.training)
             e = self.lnorm_out(e)
             e = e.reshape(pad_shape[0], pad_shape[1], -1)
             # e: (B, T, E)
@@ -678,13 +800,18 @@ class AttractorPerceiver(torch.nn.Module):
 
     def count_parameters(self, args: SimpleNamespace):
         total_params = 0
-        frame_encoder_modules = (
-            [self.linear_in, self.lnorm_in, self.lnorm_out] +
-            [getattr(self, '{}{:d}'.format("lnorm1_", i)) for i in range(self.n_layers)] +
-            [getattr(self, '{}{:d}'.format("self_att_", i)) for i in range(self.n_layers)] +
-            [getattr(self, '{}{:d}'.format("lnorm2_", i)) for i in range(self.n_layers)] +
-            [getattr(self, '{}{:d}'.format("ff_", i)) for i in range(self.n_layers)]
-            )
+        frame_encoder_modules = [self.linear_in, self.lnorm_in, self.lnorm_out]
+        if self.frame_encoder_type == 'conformer':
+            frame_encoder_modules += [
+                getattr(self, '{}{:d}'.format("conformer_", i))
+                for i in range(self.n_layers)]
+        else:
+            frame_encoder_modules += (
+                [getattr(self, '{}{:d}'.format("lnorm1_", i)) for i in range(self.n_layers)] +
+                [getattr(self, '{}{:d}'.format("self_att_", i)) for i in range(self.n_layers)] +
+                [getattr(self, '{}{:d}'.format("lnorm2_", i)) for i in range(self.n_layers)] +
+                [getattr(self, '{}{:d}'.format("ff_", i)) for i in range(self.n_layers)]
+                )
         if self.condition_frame_encoder:
             frame_encoder_modules += [self.W]
         modules = [self.pre_crossattention, self.pos_encoder,

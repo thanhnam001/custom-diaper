@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torchaudio.transforms as T
 
-import common_utils.features as features
+import diaper.common_utils.features as features
 
 
 def _apply_specaugment(Y: np.ndarray) -> np.ndarray:

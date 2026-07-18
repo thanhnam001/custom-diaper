@@ -4,7 +4,7 @@
 # Copyright 2022 Brno University of Technology (author: Federico Landini)
 # Licensed under the MIT license.
 
-from common_utils.kaldi_data import KaldiData
+from diaper.common_utils.kaldi_data import KaldiData
 from typing import Callable, Tuple
 import numpy as np
 import librosa
