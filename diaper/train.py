@@ -5,12 +5,22 @@
 # Licensed under the MIT license.
 
 import os
+import sys
 #  MAX_THREADS = '1'
 #  os.environ['OMP_NUM_THREADS'] = MAX_THREADS
 #  os.environ['MKL_NUM_THREADS'] = MAX_THREADS
 #  os.environ['OPENBLAS_NUM_THREADS'] = MAX_THREADS
 #  os.environ['VECLIB_MAXIMUM_THREADS'] = MAX_THREADS
 #  os.environ['NUMEXPR_NUM_THREADS'] = MAX_THREADS
+
+# common_utils.precomputed_diarization_dataset (and, transitively,
+# common_utils.features) use package-qualified `diaper.common_utils.*`
+# imports, which only resolve if the repo root is on sys.path. That isn't
+# the case when this script is run as `python diaper/train.py` (Python puts
+# diaper/ itself, not the repo root, on sys.path[0]). Add the repo root too
+# so both import styles resolve regardless of how this script is invoked.
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.losses import (
     get_loss,
@@ -27,6 +37,8 @@ from backend.updater import setup_optimizer, get_rate
 from common_utils.diarization_dataset import (
     KaldiDiarizationDataset,
     PrecomputedDiarizationDataset)
+from common_utils.precomputed_diarization_dataset import (
+    PrecomputedKaldiDiarizationDataset)
 from common_utils.metrics import (
     calculate_metrics,
     new_metrics,
@@ -254,7 +266,49 @@ def get_training_dataloaders(
         train_batchsize = args.train_batchsize
         dev_batchsize = args.dev_batchsize
 
-    if args.train_features_dir is None and args.valid_features_dir is None:
+    if args.train_precomputed_dir is not None or \
+            args.valid_precomputed_dir is not None:
+        assert not (args.train_precomputed_dir is None) and \
+            not (args.valid_precomputed_dir is None), \
+            "--train-precomputed-dir and --valid-precomputed-dir must " \
+            "both be defined"
+        train_set = PrecomputedKaldiDiarizationDataset(
+            precomputed_dir=args.train_precomputed_dir,
+            context_size=args.context_size,
+            n_speakers=min(args.num_speakers, args.n_attractors),  # read up to n_attractors speakers
+            subsampling=args.subsampling,
+            specaugment=args.specaugment,
+        )
+
+        dev_set = PrecomputedKaldiDiarizationDataset(
+            precomputed_dir=args.valid_precomputed_dir,
+            context_size=args.context_size,
+            n_speakers=min(args.num_speakers, args.n_attractors),  # read up to n_attractors speakers
+            subsampling=args.subsampling,
+            specaugment=args.specaugment,
+        )
+
+        train_loader = DataLoader(
+            train_set,
+            batch_size=train_batchsize,
+            collate_fn=_convert,
+            num_workers=args.num_workers,
+            shuffle=True,
+            worker_init_fn=_init_fn,
+        )
+
+        dev_loader = DataLoader(
+            dev_set,
+            batch_size=dev_batchsize,
+            collate_fn=_convert,
+            num_workers=1,
+            shuffle=False,
+            worker_init_fn=_init_fn,
+        )
+
+        Y_train, _, _, _, _, _ = train_set.__getitem__(0)
+        Y_dev, _, _, _, _, _ = dev_set.__getitem__(0)
+    elif args.train_features_dir is None and args.valid_features_dir is None:
         assert not (args.train_data_dir is None) and \
             not (args.valid_data_dir is None), "--features-dir or \
             --train-data-dir and --valid-data-dir must be defined"
@@ -500,6 +554,13 @@ def parse_arguments() -> SimpleNamespace:
                         help='kaldi-style data dir used for training.')
     parser.add_argument('--train-features-dir', default=None,
                         help='directory with pre-computed training features')
+    parser.add_argument('--train-precomputed-dir', default=None, type=str,
+                        help='directory produced by common_utils/'
+                        'precompute_features.py with precomputed training '
+                        'chunks (a different, chunk-level cache format from '
+                        '--train-features-dir; see also '
+                        'common_utils/merge_precomputed_features.py to '
+                        'combine multiple such directories)')
     parser.add_argument('--use-detection-error-rate', default=False, type=bool)
     parser.add_argument('--use-frame-selfattention', default=False, type=bool)
     parser.add_argument('--use-last-samples', default=True, type=bool)
@@ -510,6 +571,10 @@ def parse_arguments() -> SimpleNamespace:
                         help='kaldi-style data dir used for validation.')
     parser.add_argument('--valid-features-dir', default=None,
                         help='directory with pre-computed validation features')
+    parser.add_argument('--valid-precomputed-dir', default=None, type=str,
+                        help='directory produced by common_utils/'
+                        'precompute_features.py with precomputed '
+                        'validation chunks')
     args = parser.parse_args()
     return args
 
