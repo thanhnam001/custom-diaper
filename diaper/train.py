@@ -70,6 +70,20 @@ def _convert(
             'spk_ids': [i for _, _, _, _, _, i in batch]}
 
 
+def _format_metrics(metrics: Dict[str, float], n: float) -> str:
+    """Quick-view summary of the diarization-relevant metrics accumulated
+    in `metrics` (sums over `n` batches, as produced by update_metrics)."""
+    avg = {k: v / n for k, v in metrics.items()}
+    return (
+        f"loss={avg['loss']:.4f} "
+        f"DER={avg['DER']:.2f}% "
+        f"(miss={avg['DER_miss']:.2f} fa={avg['DER_FA']:.2f} "
+        f"conf={avg['DER_conf']:.2f}) "
+        f"spk_qty(ref/pred)={avg['avg_ref_spk_qty']:.2f}/"
+        f"{avg['avg_pred_spk_qty']:.2f}"
+    )
+
+
 def compute_loss_and_metrics(
     model: torch.nn.Module,
     labels: torch.Tensor,
@@ -565,8 +579,8 @@ if __name__ == '__main__':
 
     for epoch in range(int(round(init_epoch)), args.max_epochs):
         model.train()
-        for i, batch in enumerate(tqdm(train_loader,
-                                       total=len(train_loader))):
+        train_pbar = tqdm(train_loader, total=len(train_loader))
+        for i, batch in enumerate(train_pbar):
             train_batches_qty += 1
             features = batch['xs']
             labels = batch['ts']
@@ -582,8 +596,13 @@ if __name__ == '__main__':
             loss, acum_train_metrics = compute_loss_and_metrics(
                 model, labels, features, n_speakers,
                 spkids, acum_train_metrics, args)
+            train_pbar.set_postfix(loss=f"{loss.item():.4f}")
             if i % args.log_report_batches_num == \
                     (args.log_report_batches_num-1):
+                train_pbar.write(
+                    f"[epoch {epoch + 1}] batch {i + 1}/{len(train_loader)} "
+                    f"train: " + _format_metrics(
+                        acum_train_metrics, args.log_report_batches_num))
                 for k in acum_train_metrics.keys():
                     writer.add_scalar(
                         f"train_{k}",
@@ -607,7 +626,8 @@ if __name__ == '__main__':
         dev_batches_qty = 0
         with torch.no_grad():
             model.eval()
-            for i, batch in enumerate(tqdm(dev_loader, total=len(dev_loader))):
+            dev_pbar = tqdm(dev_loader, total=len(dev_loader))
+            for i, batch in enumerate(dev_pbar):
                 dev_batches_qty += 1
                 features = batch['xs']
                 labels = batch['ts']
@@ -620,12 +640,14 @@ if __name__ == '__main__':
                 labels = pad_labels_zeros(labels, max_n_speakers)
                 features = torch.stack(features).to(args.device)
                 labels = torch.stack(labels).to(args.device)
-                _, acum_dev_metrics = compute_loss_and_metrics(
+                dev_loss, acum_dev_metrics = compute_loss_and_metrics(
                     model, labels, features, n_speakers,
                     spkids, acum_dev_metrics, args)
+                dev_pbar.set_postfix(loss=f"{dev_loss.item():.4f}")
         for k in acum_dev_metrics.keys():
             writer.add_scalar(
                 f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
                 epoch * dev_batches_qty + i)
+        print(f'Done epoch {epoch + 1}/{args.max_epochs} | dev: '
+              + _format_metrics(acum_dev_metrics, dev_batches_qty))
         acum_dev_metrics = reset_metrics(acum_dev_metrics)
-        print(f'Done epoch {epoch + 1}/{args.max_epochs}')
