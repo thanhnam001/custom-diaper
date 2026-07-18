@@ -424,9 +424,12 @@ class LinearCombination(torch.nn.Module):
         # self.weights: (n_latents, n_attractors)
         # x: (B, n_latents, d_latents)
         weights_normalized = torch.nn.functional.softmax(self.weights, dim=0)
-        entropy_term = (
-            weights_normalized * torch.log(weights_normalized)
-            ).mean(dim=0).sum()
+        # xlogy(w, w) == w*log(w) but defined as 0 at w == 0; the plain
+        # w*log(w) form yields 0 * -inf = NaN once softmax entries underflow
+        # to exactly 0 in fp32 (which happens as the latent->attractor
+        # weights sharpen mid-training) and that NaN poisons the whole loss.
+        entropy_term = torch.xlogy(
+            weights_normalized, weights_normalized).mean(dim=0).sum()
         # entropy_term: (1,)
         # return: (B, n_attractors, d_latents)
         return torch.matmul(

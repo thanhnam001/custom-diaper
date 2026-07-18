@@ -124,6 +124,15 @@ def pit_loss_multispk(
                 target[i, :boundary, :].unsqueeze(0)) -
                 logsigmoid(-logits_t[i, :, :boundary].unsqueeze(0)).bmm(
                 1-target[i, :boundary, :].unsqueeze(0)))[0]
+        if not torch.isfinite(cost_mx).all():
+            raise RuntimeError(
+                f"pit_loss_multispk: non-finite PIT cost matrix for batch "
+                f"item {i} (logits finite: "
+                f"{torch.isfinite(logits[i]).all().item()}). The model is "
+                "emitting NaN/Inf activations -- training has diverged. "
+                "Resume from the last finite checkpoint; if it recurs at "
+                "the same step region, increase noam_warmup_steps (lower "
+                "peak LR).")
         pred_alig, ref_alig = linear_sum_assignment(cost_mx.to("cpu"))
         assert (np.all(pred_alig == np.arange(logits.shape[-1])))
         permutations.append(torch.from_numpy(ref_alig))

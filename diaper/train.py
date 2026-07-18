@@ -248,6 +248,12 @@ def compute_loss_and_metrics(
         osd_loss * args.osd_loss_weight + \
         spkid_loss * args.speakerid_loss_weight
 
+    if not torch.isfinite(loss):
+        # keep the accumulators clean; the caller skips the update for
+        # non-finite losses (a single spiky batch must not poison the
+        # running metrics nor, via backward, the model weights)
+        return loss, acum_metrics
+
     metrics = calculate_metrics(
         labels.detach(), y_probs.detach(), threshold=0.5)
 
@@ -669,6 +675,13 @@ if __name__ == '__main__':
             loss, acum_train_metrics = compute_loss_and_metrics(
                 model, labels, features, n_speakers,
                 spkids, acum_train_metrics, args)
+            if not torch.isfinite(loss):
+                train_pbar.write(
+                    f"[epoch {epoch + 1}] batch {i + 1}: non-finite loss "
+                    f"({loss.item()}), skipping update. "
+                    f"names={batch['names'][:2]}")
+                optimizer.zero_grad()
+                continue
             train_pbar.set_postfix(loss=f"{loss.item():.4f}")
             if i % args.log_report_batches_num == \
                     (args.log_report_batches_num-1):
@@ -701,7 +714,6 @@ if __name__ == '__main__':
             model.eval()
             dev_pbar = tqdm(dev_loader, total=len(dev_loader))
             for i, batch in enumerate(dev_pbar):
-                dev_batches_qty += 1
                 features = batch['xs']
                 labels = batch['ts']
                 spkids = batch['spk_ids']
@@ -716,11 +728,22 @@ if __name__ == '__main__':
                 dev_loss, acum_dev_metrics = compute_loss_and_metrics(
                     model, labels, features, n_speakers,
                     spkids, acum_dev_metrics, args)
+                if not torch.isfinite(dev_loss):
+                    dev_pbar.write(
+                        f"[epoch {epoch + 1}] dev batch {i + 1}: non-finite "
+                        f"loss ({dev_loss.item()}), excluded from metrics. "
+                        f"names={batch['names'][:2]}")
+                    continue
+                dev_batches_qty += 1
                 dev_pbar.set_postfix(loss=f"{dev_loss.item():.4f}")
-        for k in acum_dev_metrics.keys():
-            writer.add_scalar(
-                f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
-                epoch * dev_batches_qty + i)
-        print(f'Done epoch {epoch + 1}/{args.max_epochs} | dev: '
-              + _format_metrics(acum_dev_metrics, dev_batches_qty))
+        if dev_batches_qty > 0:
+            for k in acum_dev_metrics.keys():
+                writer.add_scalar(
+                    f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
+                    epoch * dev_batches_qty + i)
+            print(f'Done epoch {epoch + 1}/{args.max_epochs} | dev: '
+                  + _format_metrics(acum_dev_metrics, dev_batches_qty))
+        else:
+            print(f'Done epoch {epoch + 1}/{args.max_epochs} | dev: all '
+                  'batches produced non-finite loss -- model has diverged')
         acum_dev_metrics = reset_metrics(acum_dev_metrics)
