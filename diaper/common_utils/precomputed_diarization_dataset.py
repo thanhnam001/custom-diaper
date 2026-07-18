@@ -16,6 +16,11 @@ import torch
 import torchaudio.transforms as T
 
 import diaper.common_utils.features as features
+# Side-effect import: lets pickle.load() here read .pkl chunks written by
+# precompute_features.py under numpy>=2.0 even when this process is running
+# numpy<2.0. See numpy2_pickle_compat.py for why this is needed; it's a
+# no-op if numpy is already >=2.0.
+import diaper.common_utils.numpy2_pickle_compat  # noqa: F401
 
 
 def _apply_specaugment(Y: np.ndarray) -> np.ndarray:
