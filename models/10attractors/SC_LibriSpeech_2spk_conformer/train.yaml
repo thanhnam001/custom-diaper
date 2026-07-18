@@ -49,8 +49,8 @@ specaugment: False
 subsampling: 10
 time_shuffle: False
 train_batchsize: 104
-train_data_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_500h_fixed_2spks
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_500h_fixed_2spks
 use_frame_selfattention: True
 use_posenc: False
 use_pre_crossattention: True
-valid_data_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_500h_fixed_2spks_validation
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_500h_fixed_2spks_validation
