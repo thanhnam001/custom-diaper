@@ -4,6 +4,14 @@
 # Copyright 2023 Brno University of Technology (author: Federico Landini)
 # Licensed under the MIT license.
 
+# Side-effect import, must happen before torch/transformers are imported
+# below: on Python 3.10+, restores the `collections.Container`/`Mapping`/
+# etc aliases that old pinned libraries (torch==1.10.0, the fnlandini
+# transformers fork) still reach for directly on `collections` instead of
+# `collections.abc`. See common_utils/collections_abc_compat.py for
+# details; it's a no-op on Python <3.10.
+import common_utils.collections_abc_compat  # noqa: E402,F401
+
 from backend.models import (
     average_checkpoints,
     get_model,

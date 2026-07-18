@@ -22,6 +22,14 @@ import sys
 sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Side-effect import, must happen before torch/transformers are imported
+# below: on Python 3.10+, restores the `collections.Container`/`Mapping`/
+# etc aliases that old pinned libraries (torch==1.10.0, the fnlandini
+# transformers fork) still reach for directly on `collections` instead of
+# `collections.abc`. See collections_abc_compat.py for details; it's a
+# no-op on Python <3.10.
+import common_utils.collections_abc_compat  # noqa: E402,F401
+
 from backend.losses import (
     get_loss,
     pad_labels_zeros,
