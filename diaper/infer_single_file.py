@@ -4,6 +4,16 @@
 # Copyright 2023 Brno University of Technology (author: Federico Landini)
 # Licensed under the MIT license.
 
+# common_utils.precomputed_diarization_dataset (and, transitively,
+# common_utils.features) use package-qualified `diaper.common_utils.*`
+# imports, which only resolve if the repo root is on sys.path. That isn't
+# the case when this script is run as `python diaper/train.py` (Python puts
+# diaper/ itself, not the repo root, on sys.path[0]). Add the repo root too
+# so both import styles resolve regardless of how this script is invoked.
+import sys
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Side-effect import, must happen before torch/transformers are imported
 # below: on Python 3.10+, restores the `collections.Container`/`Mapping`/
 # etc aliases that old pinned libraries (torch==1.10.0, the fnlandini
