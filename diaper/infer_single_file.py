@@ -10,6 +10,7 @@
 # the case when this script is run as `python diaper/train.py` (Python puts
 # diaper/ itself, not the repo root, on sys.path[0]). Add the repo root too
 # so both import styles resolve regardless of how this script is invoked.
+import os
 import sys
 sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
