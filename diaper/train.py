@@ -47,6 +47,8 @@ from common_utils.diarization_dataset import (
     PrecomputedDiarizationDataset)
 from common_utils.precomputed_diarization_dataset import (
     PrecomputedKaldiDiarizationDataset)
+from common_utils.precomputed_chunk_dataset import (
+    TorchPrecomputedKaldiDiarizationDataset)
 from common_utils.metrics import (
     calculate_metrics,
     new_metrics,
@@ -280,7 +282,49 @@ def get_training_dataloaders(
         train_batchsize = args.train_batchsize
         dev_batchsize = args.dev_batchsize
 
-    if args.train_precomputed_dir is not None or \
+    if args.train_precomputed_chunk_dir is not None or \
+            args.valid_precomputed_chunk_dir is not None:
+        assert not (args.train_precomputed_chunk_dir is None) and \
+            not (args.valid_precomputed_chunk_dir is None), \
+            "--train-precomputed-chunk-dir and --valid-precomputed-chunk-dir " \
+            "must both be defined"
+        train_set = TorchPrecomputedKaldiDiarizationDataset(
+            precomputed_dir=args.train_precomputed_chunk_dir,
+            context_size=args.context_size,
+            n_speakers=min(args.num_speakers, args.n_attractors),  # read up to n_attractors speakers
+            subsampling=args.subsampling,
+            specaugment=args.specaugment,
+        )
+
+        dev_set = TorchPrecomputedKaldiDiarizationDataset(
+            precomputed_dir=args.valid_precomputed_chunk_dir,
+            context_size=args.context_size,
+            n_speakers=min(args.num_speakers, args.n_attractors),  # read up to n_attractors speakers
+            subsampling=args.subsampling,
+            specaugment=args.specaugment,
+        )
+
+        train_loader = DataLoader(
+            train_set,
+            batch_size=train_batchsize,
+            collate_fn=_convert,
+            num_workers=args.num_workers,
+            shuffle=True,
+            worker_init_fn=_init_fn,
+        )
+
+        dev_loader = DataLoader(
+            dev_set,
+            batch_size=dev_batchsize,
+            collate_fn=_convert,
+            num_workers=1,
+            shuffle=False,
+            worker_init_fn=_init_fn,
+        )
+
+        Y_train, _, _, _, _, _ = train_set.__getitem__(0)
+        Y_dev, _, _, _, _, _ = dev_set.__getitem__(0)
+    elif args.train_precomputed_dir is not None or \
             args.valid_precomputed_dir is not None:
         assert not (args.train_precomputed_dir is None) and \
             not (args.valid_precomputed_dir is None), \
@@ -575,6 +619,13 @@ def parse_arguments() -> SimpleNamespace:
                         '--train-features-dir; see also '
                         'common_utils/merge_precomputed_features.py to '
                         'combine multiple such directories)')
+    parser.add_argument('--train-precomputed-chunk-dir', default=None, type=str,
+                        help='directory of per-chunk .pt files produced by '
+                        'the sibling Master project\'s precompute pipeline '
+                        '(src/dataloader/diaper/per_chunk_precompute.py) '
+                        '-- lets training reuse that cache directly instead '
+                        'of --train-precomputed-dir\'s pickle format; see '
+                        'common_utils/precomputed_chunk_dataset.py')
     parser.add_argument('--use-detection-error-rate', default=False, type=bool)
     parser.add_argument('--use-frame-selfattention', default=False, type=bool)
     parser.add_argument('--use-last-samples', default=True, type=bool)
@@ -589,6 +640,10 @@ def parse_arguments() -> SimpleNamespace:
                         help='directory produced by common_utils/'
                         'precompute_features.py with precomputed '
                         'validation chunks')
+    parser.add_argument('--valid-precomputed-chunk-dir', default=None, type=str,
+                        help='directory of per-chunk .pt files produced by '
+                        'the sibling Master project\'s precompute pipeline '
+                        '-- see --train-precomputed-chunk-dir')
     args = parser.parse_args()
     return args
 
