@@ -440,7 +440,7 @@ def parse_arguments() -> SimpleNamespace:
                         help='how are attractors and frame embeddings compared')
     parser.add_argument('--att-qty-loss-weight', default=0.0, type=float)
     parser.add_argument('--condition-frame-encoder', type=bool, default=True)
-    parser.add_argument('--conformer-conv-kernel-size', default=31, type=int,
+    parser.add_argument('--conformer-conv-kernel-size', default=3, type=int,
                         help='depthwise-conv kernel size for the conformer '
                         'frame encoder (must be odd)')
     parser.add_argument('--context-activations', type=bool, default=False)
