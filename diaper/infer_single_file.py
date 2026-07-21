@@ -53,6 +53,7 @@ import numpy as np
 import os
 import random
 import soundfile as sf
+import threadpoolctl
 import torch
 import yamlargparse
 from dataclasses import dataclass
@@ -103,6 +104,7 @@ class InferenceArgs:
     normalize_probs: bool
     num_frames: int
     num_speakers: int
+    num_threads: int
     plot_output: bool
     posenc_maxlen: int
     pre_xa_heads: int
@@ -121,6 +123,7 @@ class InferenceArgs:
     use_pre_crossattention: bool
     vad_loss_weight: float
     wav_dir: str
+    wav_list: str
     wav_name: str
 
 def parse_arguments() -> InferenceArgs:
@@ -200,6 +203,12 @@ def parse_arguments() -> InferenceArgs:
     parser.add_argument('--num-frames', default=-1, type=int,
                         help='number of frames in one utterance')
     parser.add_argument('--num-speakers', type=int)
+    parser.add_argument('--num-threads', default=-1, type=int,
+                        help='cap CPU threads used for feature extraction '
+                        '(librosa/numpy BLAS) and model inference. The '
+                        'mel-filterbank matmul in librosa otherwise fans '
+                        'out across every core via OpenBLAS/MKL. '
+                        '-1 leaves the library default (all cores) in place.')
     parser.add_argument('--plot-output', default=False, type=bool)
     parser.add_argument('--posenc-maxlen', type=int, default=36000,
                         help="The maximum length allowed for the positional \
@@ -224,14 +233,34 @@ def parse_arguments() -> InferenceArgs:
     parser.add_argument('--use-posenc', default=False, type=bool)
     parser.add_argument('--use-pre-crossattention', default=False, type=bool)
     parser.add_argument('--vad-loss-weight', default=0.0, type=float)
-    parser.add_argument('--wav-dir', required=True, type=str)
+    parser.add_argument('--wav-dir', required=False, default='', type=str,
+                        help='directory to search for wav files in '
+                        '(a single one if --wav-name is set, else every '
+                        '*.wav found recursively). Ignored if --wav-list '
+                        'is set.')
+    parser.add_argument('--wav-list', required=False, default='', type=str,
+                        help='path to a txt file with one absolute wav '
+                        'path per line, used instead of --wav-dir/'
+                        '--wav-name. Blank lines and lines starting with '
+                        '# are skipped.')
     parser.add_argument('--wav-name', required=False, type=str)
     args = parser.parse_args()
+    assert args.wav_dir or args.wav_list, \
+        "Either '--wav-dir' or '--wav-list' has to be given."
     return args
 
 
 if __name__ == '__main__':
     args = parse_arguments()
+
+    if args.num_threads > 0:
+        # Caps torch's own intra-op thread pool (used by the model forward
+        # pass) and, via threadpoolctl, the OpenBLAS/MKL thread pool that
+        # numpy/librosa dispatch into (e.g. the mel-filterbank matmul in
+        # common_utils.features.transform) -- that matmul is what pegs every
+        # core, since OpenBLAS defaults to using all of them per call.
+        torch.set_num_threads(args.num_threads)
+        threadpoolctl.threadpool_limits(limits=args.num_threads)
 
     # For reproducibility
     torch.manual_seed(args.seed)
@@ -283,11 +312,17 @@ if __name__ == '__main__':
     )
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    wav_dir = Path(args.wav_dir)
-    if wav_dir.is_dir() and args.wav_name is not None:
-        filepaths = [wav_dir / f"{args.wav_name}.wav"]
+    if args.wav_list:
+        with open(args.wav_list) as wav_list_file:
+            filepaths = [
+                Path(line.strip()) for line in wav_list_file
+                if line.strip() and not line.strip().startswith('#')]
     else:
-        filepaths = list(Path(wav_dir).rglob('*.wav'))
+        wav_dir = Path(args.wav_dir)
+        if wav_dir.is_dir() and args.wav_name is not None:
+            filepaths = [wav_dir / f"{args.wav_name}.wav"]
+        else:
+            filepaths = list(Path(wav_dir).rglob('*.wav'))
     print('Total file', len(filepaths))
     for filepath in tqdm(filepaths):
         duration = librosa.get_duration(filename=filepath)
