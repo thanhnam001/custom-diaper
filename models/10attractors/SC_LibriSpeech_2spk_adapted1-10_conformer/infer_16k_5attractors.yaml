@@ -17,14 +17,15 @@ frame_size: 400
 gpu: 0
 # infer_data_dir: /not/needed/for/single/file
 # infer_data_dir: ./voxconverse/test_kaldidata
-infer_data_dir: /data/ocr/namvt17/dataset/diarization/ramc_test/
+# infer_data_dir: /data/ocr/namvt17/dataset/diarization/ramc_test/
+infer_data_dir: /data/ocr/namvt17/dataset/diarization/msdwild_wavs
 input_transform: logmel_meannorm
 latents2attractors: weighted_average
 median_window_length: 1
 model_type: AttractorPerceiver
 # models_path: <your path>/DiaPer/models/10attractors/SC_LibriSpeech_2spk_adapted1-10/models
 # models_path: ./models/10attractors/SC_LibriSpeech_2spk_adapted1-10_retrain100h
-models_path: ./models/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_300h_maximum5spks/models
+models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_300h_maximum5spks/models
 n_attractors: 10
 n_blocks_attractors: 3
 n_internal_blocks_attractors: 1
@@ -37,7 +38,8 @@ pre_xa_heads: 4
 # rttms_dir: <your path>/DiaPer/examples/10att_withoutFT
 # rttms_dir: ./output_retrain_SC_LibriSpeech_100h/voxconverse_test
 # rttms_dir: ./models/10attractors/SC_LibriSpeech_2spk_adapted1-10_300h_maximum5spks/voxconverse_test_pred
-rttms_dir: ./models/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_300h_maximum5spks/ramc_test_pred
+# rttms_dir: ./models/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_300h_maximum5spks/ramc_test_pred
+rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_300h_maximum5spks/msdwild_pred
 sampling_rate: 16000
 seed: 3
 subsampling: 5

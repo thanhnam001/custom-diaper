@@ -7,14 +7,14 @@ condition_frame_encoder: True
 context_size: 7
 d_latents: 128
 detach_attractor_loss: False
-dev_batchsize: 24
+dev_batchsize: 96
 dropout_attractors: 0.1
 dropout_frames: 0.1
 feature_dim: 40
 frame_encoder_heads: 4
 frame_encoder_layers: 4
 frame_encoder_units: 2048
-frame_encoder_type:  # none for legacy model
+frame_encoder_type: self_attention # none for legacy model
 frame_shift: 160
 frame_size: 400
 use_last_samples: True
@@ -24,7 +24,7 @@ input_transform: logmel_meannorm
 intermediate_loss_frameencoder: True
 intermediate_loss_perceiver: True
 latents2attractors: weighted_average
-log_report_batches_num: 1000 # need recompute
+log_report_batches_num: 256 # need recompute
 max_epochs: 100
 model_type: AttractorPerceiver
 n_attractors: 10
@@ -34,12 +34,12 @@ n_latents: 128
 n_selfattends_attractors: 2
 n_sa_heads_attractors: 4
 n_xa_heads_attractors: 4
-noam_model_size: 512 # need recompute
-noam_warmup_steps: 200000 # need recompute
+noam_model_size: 4001 # need recompute
+noam_warmup_steps: 2560 # need recompute
 norm_loss_per_spk: True
 num_frames: 600
 num_speakers: 2
-num_workers: 16
+num_workers: 4
 optimizer: noam
 output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_pretrain500h
 pre_xa_heads: 4
@@ -48,7 +48,7 @@ seed: 3
 specaugment: False
 subsampling: 10
 time_shuffle: False
-train_batchsize: 20
+train_batchsize: 120 
 train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_500h_fixed_2spks
 use_frame_selfattention: True
 use_posenc: False
