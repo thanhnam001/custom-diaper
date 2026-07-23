@@ -21,7 +21,7 @@ input_transform: logmel_meannorm
 latents2attractors: weighted_average
 median_window_length: 1
 model_type: AttractorPerceiver
-models_path: experiments/10attractors/SC_Librispeech_2spk_adapted1-10_conformer_conv_kernel3_300h_maximum5spks/models_finetuneRAMC/models
+models_path: experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_conv_kernel3_300h_maximum5spks/models_finetuneRAMC/models
 n_attractors: 10
 n_blocks_attractors: 3
 n_internal_blocks_attractors: 1
@@ -31,7 +31,7 @@ n_sa_heads_attractors: 4
 n_xa_heads_attractors: 4
 num_frames: -1
 pre_xa_heads: 4
-rttms_dir: experiments/10attractors/SC_Librispeech_2spk_adapted1-10_conformer_conv_kernel3_300h_maximum5spks/models_finetuneRAMC/ramc_test_pred
+rttms_dir: experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_conv_kernel3_300h_maximum5spks/models_finetuneRAMC/ramc_test_pred
 sampling_rate: 16000
 seed: 3
 subsampling: 5

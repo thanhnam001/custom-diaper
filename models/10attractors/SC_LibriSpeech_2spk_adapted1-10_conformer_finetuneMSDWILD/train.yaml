@@ -22,7 +22,7 @@ use_last_samples: True
 gpu: 1
 gradclip: 5
 init_epochs: 90-100
-init_model_path: experiments/10attractors/SC_Librispeech_2spk_adapted1-10_conformer_conv_kernel3_300h_maximum5spks/models
+init_model_path: experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_conv_kernel3_300h_maximum5spks/models
 input_transform: logmel_meannorm
 intermediate_loss_frameencoder: True
 intermediate_loss_perceiver: True
@@ -43,7 +43,7 @@ num_frames: 600
 num_speakers: 10
 num_workers: 4
 optimizer: adam
-output_path: experiments/10attractors/SC_Librispeech_2spk_adapted1-10_conformer_conv_kernel3_300h_maximum5spks/models_finetuneMSDWILD
+output_path: experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_conv_kernel3_300h_maximum5spks/models_finetuneMSDWILD
 pre_xa_heads: 4
 sampling_rate: 16000
 seed: 3
