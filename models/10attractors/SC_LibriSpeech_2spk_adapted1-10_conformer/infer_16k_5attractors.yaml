@@ -1,5 +1,6 @@
 # inference options
 condition_frame_encoder: True
+conformer_conv_kernel_size: 31
 context_size: 7
 d_latents: 128
 dropout_attractors: 0.1

@@ -4,6 +4,7 @@ activation_loss_DER_weight: 0.0
 attractor_existence_loss_weight: 1.0
 attractor_frame_comparison: dotprod
 condition_frame_encoder: True
+conformer_conv_kernel_size: 31
 context_size: 7
 d_latents: 128
 detach_attractor_loss: False
