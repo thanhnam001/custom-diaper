@@ -7,13 +7,14 @@ condition_frame_encoder: True
 context_size: 7
 d_latents: 128
 detach_attractor_loss: False
-dev_batchsize: 32
+dev_batchsize: 16
 dropout_attractors: 0.1
 dropout_frames: 0.1
 feature_dim: 40
 frame_encoder_heads: 4
 frame_encoder_layers: 4
 frame_encoder_units: 2048
+frame_encoder_type: conformer
 frame_shift: 160
 frame_size: 400
 use_last_samples: True
@@ -23,7 +24,7 @@ input_transform: logmel_meannorm
 intermediate_loss_frameencoder: True
 intermediate_loss_perceiver: True
 latents2attractors: weighted_average
-log_report_batches_num: 24 # need recompute
+log_report_batches_num: 20
 max_epochs: 100
 model_type: AttractorPerceiver
 n_attractors: 10
@@ -33,25 +34,25 @@ n_latents: 128
 n_selfattends_attractors: 2
 n_sa_heads_attractors: 4
 n_xa_heads_attractors: 4
-noam_model_size: 42668 # need recompute
-noam_warmup_steps: 2400 # need recompute
+noam_model_size: 34134
+noam_warmup_steps: 3000
 norm_loss_per_spk: True
 num_frames: 2400
-num_speakers: 10
-num_workers: 4
+num_speakers: 5
+num_workers: 8
 optimizer: noam
-output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_300h_maximum5spks
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_conv_kernel3_300h_maximum5spks #<output directory>
 pre_xa_heads: 4
 sampling_rate: 16000
 seed: 3
 specaugment: False
 subsampling: 10
 time_shuffle: False
-train_batchsize: 20
-train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_5spks_24000frames/train
+train_batchsize: 16
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_5spks_24000frames/train #<data_dir>/data/SC_LibriSpeech/v1_1-10spks_all2500h/train/data
 use_frame_selfattention: True
 use_posenc: False
 use_pre_crossattention: True
-valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_5spks_24000frames/validation
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_5spks_24000frames/validation #<data_dir>/SC_LibriSpeech/v1_1-10spks_all2500h/validation/data
 init_epochs: 90-100
-init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_pretrain500h/models
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_conv_kernel3_pretrain500h/models #<directory with model trained for 2 speakers>/models
