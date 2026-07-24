@@ -35,10 +35,12 @@ from train import _convert
 from types import SimpleNamespace
 from typing import List, TextIO, Tuple
 from scipy.signal import medfilt
+from tqdm import tqdm
 import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import random
+import threadpoolctl
 import torch
 import yamlargparse
 
@@ -333,6 +335,12 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--num-frames', default=-1, type=int,
                         help='number of frames in one utterance')
     parser.add_argument('--num-speakers', type=int)
+    parser.add_argument('--num-threads', default=-1, type=int,
+                        help='cap CPU threads used for feature extraction '
+                        '(librosa/numpy BLAS) and model inference. The '
+                        'mel-filterbank matmul in librosa otherwise fans '
+                        'out across every core via OpenBLAS/MKL. '
+                        '-1 leaves the library default (all cores) in place.')
     parser.add_argument('--plot-output', default=False, type=bool)
     parser.add_argument('--posenc-maxlen', type=int, default=36000,
                         help="The maximum length allowed for the positional \
@@ -363,6 +371,15 @@ def parse_arguments() -> SimpleNamespace:
 
 if __name__ == '__main__':
     args = parse_arguments()
+
+    if args.num_threads > 0:
+        # Caps torch's own intra-op thread pool (used by the model forward
+        # pass) and, via threadpoolctl, the OpenBLAS/MKL thread pool that
+        # numpy/librosa dispatch into (e.g. the mel-filterbank matmul in
+        # common_utils.features.transform) -- that matmul is what pegs every
+        # core, since OpenBLAS defaults to using all of them per call.
+        torch.set_num_threads(args.num_threads)
+        threadpoolctl.threadpool_limits(limits=args.num_threads)
 
     # For reproducibility
     torch.manual_seed(args.seed)
@@ -415,8 +432,8 @@ if __name__ == '__main__':
     )
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-    for i, batch in enumerate(infer_loader):
-        print(f'Done sample {i}')
+    infer_pbar = tqdm(infer_loader, total=len(infer_loader))
+    for batch in infer_pbar:
         try:
             input = torch.stack(batch['xs']).to(args.device)
             name = batch['names'][0]
