@@ -53,7 +53,6 @@ from common_utils.metrics import (
     reset_metrics,
     update_metrics,
 )
-# from safe_gpu import safe_gpu
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from types import SimpleNamespace
@@ -616,7 +615,6 @@ if __name__ == '__main__':
     writer = SummaryWriter(f"{args.output_path}/tensorboard")
 
     if args.gpu >= 1:
-        # safe_gpu.claim_gpus(nb_gpus=args.gpu)
         args.device = torch.device("cuda")
         args.log_report_batches_num = int(args.log_report_batches_num / args.gpu)
         torch.multiprocessing.set_sharing_strategy('file_system')

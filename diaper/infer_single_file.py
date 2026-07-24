@@ -27,11 +27,9 @@ from backend.models import (
     average_checkpoints,
     get_model,
 )
-from common_utils.diarization_dataset import KaldiDiarizationDataset
 from common_utils.features import stft, transform, splice, subsample
 from infer import (
     estimate_diarization_outputs,
-    get_infer_dataloader,
     hard_labels_to_rttm,
     postprocess_output,
     rttm_to_hard_labels,
@@ -39,13 +37,7 @@ from infer import (
 from os.path import join
 from pathlib import Path
 from tqdm import tqdm
-# from safe_gpu import safe_gpu
-from scipy.signal import medfilt
-from torch.utils.data import DataLoader
 from train import _convert
-from types import SimpleNamespace
-from typing import List, TextIO, Tuple
-import h5py
 import librosa
 import logging
 import matplotlib.pyplot as plt
@@ -277,7 +269,6 @@ if __name__ == '__main__':
     logging.info(args)
 
     if args.gpu >= 1:
-        # safe_gpu.claim_gpus(nb_gpus=args.gpu)
         args.device = torch.device("cuda")
     else:
         args.device = torch.device("cpu")

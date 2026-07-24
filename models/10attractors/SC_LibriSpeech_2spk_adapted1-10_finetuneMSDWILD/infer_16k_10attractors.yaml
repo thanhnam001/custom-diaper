@@ -4,7 +4,6 @@ context_size: 7
 d_latents: 128
 dropout_attractors: 0.1
 dropout_frames: 0.1
-epochs: 740-750
 estimate_spk_qty: -1
 estimate_spk_qty_thr: 0.5
 feature_dim: 40
@@ -28,6 +27,7 @@ n_selfattends_attractors: 2
 n_sa_heads_attractors: 4
 n_xa_heads_attractors: 4
 num_frames: -1
+num_speakers: 10
 pre_xa_heads: 4
 rttms_dir: experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_300h_maximum5spks/models_finetuneMSDWILD/msdwild_test_pred
 sampling_rate: 16000
