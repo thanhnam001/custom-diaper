@@ -2,12 +2,14 @@
 set -e
 
 # MSDWild layout: all wavs in one folder, one combined *.rttm file per
-# split (paper's few.train/few.val/many.val -> train/dev/test here).
+# split (paper's few.train -> train, many.val -> dev, few.val -> test here;
+# "test" must be few.val since infer_16k_10attractors.yaml reads kaldi/test
+# and the README's reported MSDWild numbers are for the few.val split).
 
 WAV_DIR=/data/ocr/namvt17/dataset/diarization/msdwild_wavs
 RTTM_TRAIN=/data/ocr/namvt17/dataset/diarization/msdwild/rttms/few.train.rttm   # e.g. few.train.rttm
-RTTM_DEV=/data/ocr/namvt17/dataset/diarization/msdwild/rttms/few.val.rttm       # e.g. few.val.rttm
-RTTM_TEST=/data/ocr/namvt17/dataset/diarization/msdwild/rttms/many.val.rttm     # e.g. many.val.rttm
+RTTM_DEV=/data/ocr/namvt17/dataset/diarization/msdwild/rttms/many.val.rttm     # e.g. many.val.rttm
+RTTM_TEST=/data/ocr/namvt17/dataset/diarization/msdwild/rttms/few.val.rttm      # e.g. few.val.rttm
 KALDI_DIR=/data/ocr/namvt17/dataset/diarization/msdwild/kaldi
 PRECOMPUTE_DIR=/data/ocr/namvt17/dataset/diarization/msdwild_precompute_6000frames
 

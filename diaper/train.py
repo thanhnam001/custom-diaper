@@ -6,12 +6,6 @@
 
 import os
 import sys
-#  MAX_THREADS = '1'
-#  os.environ['OMP_NUM_THREADS'] = MAX_THREADS
-#  os.environ['MKL_NUM_THREADS'] = MAX_THREADS
-#  os.environ['OPENBLAS_NUM_THREADS'] = MAX_THREADS
-#  os.environ['VECLIB_MAXIMUM_THREADS'] = MAX_THREADS
-#  os.environ['NUMEXPR_NUM_THREADS'] = MAX_THREADS
 
 # common_utils.precomputed_diarization_dataset (and, transitively,
 # common_utils.features) use package-qualified `diaper.common_utils.*`
@@ -57,25 +51,30 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
+import functools
 import logging
 import numpy as np
 import random
+import threadpoolctl
 import torch
 import yamlargparse
 from tqdm import tqdm
 
-#  torch.set_num_threads(1)
-#  torch.set_num_interop_threads(1)
 
-def _init_fn(worker_id):
+def _init_fn(worker_id, num_threads=-1):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
-    #  torch.set_num_threads(1)
-    #  threads = '1'
-    #  os.environ['OMP_NUM_THREADS'] = threads
-    #  os.environ['MKL_NUM_THREADS'] = threads
-    #  os.environ['OPENBLAS_NUM_THREADS'] = threads
+    if num_threads > 0:
+        # Each DataLoader worker is its own process and does its own
+        # librosa/numpy feature extraction (STFT + mel-filterbank matmul in
+        # common_utils.features.transform); without this, OpenBLAS/MKL fans
+        # that matmul out across every core independently *per worker*, so
+        # num_workers processes can together claim far more than
+        # num_workers cores. --num-threads in __main__ caps only the main
+        # process; this caps each worker the same way.
+        torch.set_num_threads(num_threads)
+        threadpoolctl.threadpool_limits(limits=num_threads)
 
 
 def _convert(
@@ -253,8 +252,17 @@ def compute_loss_and_metrics(
         # running metrics nor, via backward, the model weights)
         return loss, acum_metrics
 
+    # Metrics must reflect the same decision process infer.py uses: a
+    # speaker only counts as active if its attractor is judged to exist
+    # (attractor_existence_loss target), not just from its frame-wise
+    # activation probability (activation_loss_BCE target) -- those are two
+    # separate heads trained by two separate losses.
+    existence_probs = torch.sigmoid(per_frameenclayer_attractors_logits[:, :, -1])
+    active_attractors = (existence_probs > args.estimate_spk_qty_thr).float()
+    y_probs_gated = y_probs * active_attractors.unsqueeze(1)
+
     metrics = calculate_metrics(
-        labels.detach(), y_probs.detach(), threshold=0.5)
+        labels.detach(), y_probs_gated.detach(), threshold=0.5)
 
     acum_metrics = update_metrics(acum_metrics, metrics)
     acum_metrics['loss'] += loss.item()
@@ -307,7 +315,8 @@ def get_training_dataloaders(
             collate_fn=_convert,
             num_workers=args.num_workers,
             shuffle=True,
-            worker_init_fn=_init_fn,
+            worker_init_fn=functools.partial(
+                _init_fn, num_threads=args.num_threads),
         )
 
         dev_loader = DataLoader(
@@ -316,7 +325,8 @@ def get_training_dataloaders(
             collate_fn=_convert,
             num_workers=1,
             shuffle=False,
-            worker_init_fn=_init_fn,
+            worker_init_fn=functools.partial(
+                _init_fn, num_threads=args.num_threads),
         )
 
         Y_train, _, _, _, _, _ = train_set.__getitem__(0)
@@ -365,7 +375,8 @@ def get_training_dataloaders(
             collate_fn=_convert,
             num_workers=args.num_workers,
             shuffle=True,
-            worker_init_fn=_init_fn,
+            worker_init_fn=functools.partial(
+                _init_fn, num_threads=args.num_threads),
         )
 
         dev_loader = DataLoader(
@@ -374,7 +385,8 @@ def get_training_dataloaders(
             collate_fn=_convert,
             num_workers=1,
             shuffle=False,
-            worker_init_fn=_init_fn,
+            worker_init_fn=functools.partial(
+                _init_fn, num_threads=args.num_threads),
         )
 
         Y_train, _, _, _, _, _ = train_set.__getitem__(0)
@@ -396,7 +408,8 @@ def get_training_dataloaders(
             batch_size=train_batchsize,
             collate_fn=_convert,
             num_workers=args.num_workers,
-            worker_init_fn=_init_fn,
+            worker_init_fn=functools.partial(
+                _init_fn, num_threads=args.num_threads),
         )
 
         dev_loader = DataLoader(
@@ -404,7 +417,8 @@ def get_training_dataloaders(
             batch_size=dev_batchsize,
             collate_fn=_convert,
             num_workers=1,
-            worker_init_fn=_init_fn,
+            worker_init_fn=functools.partial(
+                _init_fn, num_threads=args.num_threads),
         )
 
     return train_loader, dev_loader
@@ -456,6 +470,21 @@ def parse_arguments() -> SimpleNamespace:
                         help='attention dropout for attractors path')
     parser.add_argument('--dropout_frames', type=float,
                         help='attention dropout for frame embeddings path')
+    parser.add_argument('--early-stopping', default=False, type=bool,
+                        help='enable early stopping on dev DER; intended '
+                        'for finetuning runs, since --init-model-path is '
+                        'also used for adaptation runs meant to always run '
+                        'a fixed number of epochs')
+    parser.add_argument('--early-stopping-patience', default=30, type=int,
+                        help='stop training if dev DER has not improved '
+                        'for this many consecutive epochs; only takes '
+                        'effect when --early-stopping is set')
+    parser.add_argument('--estimate-spk-qty-thr', default=0.5, type=float,
+                        help='attractor existence probability threshold used '
+                        'to gate frame-wise activations when computing '
+                        'validation metrics, mirroring infer.py\'s decision '
+                        'process instead of thresholding raw frame-wise '
+                        'probabilities alone')
     parser.add_argument('--feature-dim', type=int)
     parser.add_argument('--frame-encoder-heads', type=int)
     parser.add_argument('--frame-encoder-layers', type=int)
@@ -539,6 +568,12 @@ def parse_arguments() -> SimpleNamespace:
                         help='maximum number of speakers allowed')
     parser.add_argument('--num-workers', default=1, type=int,
                         help='number of workers in train DataLoader')
+    parser.add_argument('--num-threads', default=-1, type=int,
+                        help='cap CPU threads used for feature extraction '
+                        '(librosa/numpy BLAS) and model training. The '
+                        'mel-filterbank matmul in librosa otherwise fans '
+                        'out across every core via OpenBLAS/MKL. '
+                        '-1 leaves the library default (all cores) in place.')
     parser.add_argument('--optimizer', type=str)
     parser.add_argument('--osd-loss-weight', default=0.0, type=float)
     parser.add_argument('--output-path', type=str)
@@ -595,6 +630,17 @@ def parse_arguments() -> SimpleNamespace:
 if __name__ == '__main__':
 
     args = parse_arguments()
+
+    if args.num_threads > 0:
+        # Caps torch's own intra-op thread pool (used by the model forward/
+        # backward pass) and, via threadpoolctl, the OpenBLAS/MKL thread pool
+        # that numpy/librosa dispatch into (e.g. the mel-filterbank matmul in
+        # common_utils.features.transform) -- that matmul is what pegs every
+        # core, since OpenBLAS defaults to using all of them per call. This
+        # only covers the main process; DataLoader workers (--num-workers)
+        # spawn as separate processes and get the same cap via _init_fn.
+        torch.set_num_threads(args.num_threads)
+        threadpoolctl.threadpool_limits(limits=args.num_threads)
 
     # For reproducibility
     torch.manual_seed(args.seed)
@@ -653,6 +699,9 @@ if __name__ == '__main__':
 
     model.to(args.device)
     train_batches_qty = 0
+
+    best_dev_der = float('inf')
+    epochs_without_improvement = 0
 
     for epoch in range(int(round(init_epoch)), args.max_epochs):
         model.train()
@@ -741,6 +790,23 @@ if __name__ == '__main__':
                     epoch * dev_batches_qty + i)
             print(f'Done epoch {epoch + 1}/{args.max_epochs} | dev: '
                   + _format_metrics(acum_dev_metrics, dev_batches_qty))
+
+            if args.early_stopping:
+                dev_der = acum_dev_metrics['DER'] / dev_batches_qty
+                if dev_der < best_dev_der:
+                    best_dev_der = dev_der
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
+                    print(f'Dev DER did not improve for '
+                          f'{epochs_without_improvement} epoch(s) '
+                          f'(best: {best_dev_der:.2f})')
+                if epochs_without_improvement >= args.early_stopping_patience:
+                    print(f'Early stopping: dev DER has not improved for '
+                          f'{args.early_stopping_patience} epochs, '
+                          f'stopping finetuning at epoch {epoch + 1}.')
+                    acum_dev_metrics = reset_metrics(acum_dev_metrics)
+                    break
         else:
             print(f'Done epoch {epoch + 1}/{args.max_epochs} | dev: all '
                   'batches produced non-finite loss -- model has diverged')

@@ -10,6 +10,7 @@ detach_attractor_loss: False
 dev_batchsize: 128
 dropout_attractors: 0.1
 dropout_frames: 0.1
+early_stopping: true
 feature_dim: 23
 frame_encoder_heads: 4
 frame_encoder_layers: 4
@@ -40,6 +41,7 @@ norm_loss_per_spk: True
 num_frames: 600
 num_speakers: 7
 num_workers: 4
+num_threads: 1
 optimizer: adam
 output_path: <output directory>
 pre_xa_heads: 4
