@@ -7,9 +7,10 @@
 # common_utils.precomputed_diarization_dataset (and, transitively,
 # common_utils.features) use package-qualified `diaper.common_utils.*`
 # imports, which only resolve if the repo root is on sys.path. That isn't
-# the case when this script is run as `python diaper/train.py` (Python puts
-# diaper/ itself, not the repo root, on sys.path[0]). Add the repo root too
-# so both import styles resolve regardless of how this script is invoked.
+# the case when this script is run as `python diaper/infer_single_file.py`
+# (Python puts diaper/ itself, not the repo root, on sys.path[0]). Add the
+# repo root too so both import styles resolve regardless of how this
+# script is invoked.
 import os
 import sys
 sys.path.insert(
@@ -42,7 +43,6 @@ import librosa
 import logging
 import matplotlib.pyplot as plt
 import numpy as np
-import os
 import random
 import soundfile as sf
 import threadpoolctl
