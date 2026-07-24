@@ -33,8 +33,8 @@ n_latents: 128
 n_selfattends_attractors: 2
 n_sa_heads_attractors: 4
 n_xa_heads_attractors: 4
-noam_model_size: 42668 # need recompute
-noam_warmup_steps: 2400 # need recompute
+noam_model_size: 43391 # need recompute
+noam_warmup_steps: 2360 # need recompute
 norm_loss_per_spk: True
 num_frames: 2400
 num_speakers: 10
