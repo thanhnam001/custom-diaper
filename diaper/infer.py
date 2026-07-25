@@ -275,6 +275,11 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--conformer-conv-kernel-size', default=3, type=int,
                         help='depthwise-conv kernel size for the conformer '
                         'frame encoder (must be odd)')
+    parser.add_argument('--conv-norm-type', default='batchnorm', type=str,
+                        choices=['batchnorm', 'layernorm'],
+                        help='normalization used inside the conformer '
+                        'frame encoder\'s ConvolutionModule; must match '
+                        'the value the model was trained with')
     parser.add_argument('--context-activations', type=bool, default=False)
     parser.add_argument('--context-size', type=int)
     parser.add_argument('--d-latents', type=int,

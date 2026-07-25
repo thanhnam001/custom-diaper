@@ -6,7 +6,7 @@
 import torch.optim as optim
 from torch.nn import Module
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 
 class NoamOpt:
@@ -57,6 +57,28 @@ class NoamOpt:
 
     def zero_grad(self) -> None:
         self.optimizer.zero_grad()
+
+
+def compute_noam_params(
+    max_epochs: int,
+    iters_per_epoch: int,
+    warmup_fraction: float,
+    peak_lr: float,
+) -> Tuple[int, int]:
+    """Derive noam_model_size/noam_warmup_steps from a training budget and a
+    target peak LR, so they don't have to be hand-computed per run (mirrors
+    common_utils/noam_lr_calc.py -- see that module's docstring for the
+    derivation and for the provenance of a validated default peak_lr).
+
+    NoamOpt.rate(step) = model_size^-0.5 * min(step^-0.5, step*warmup^-1.5)
+    peaks at step == warmup, where peak_lr = 1/sqrt(model_size*warmup); for a
+    chosen warmup (a fraction of total steps) and peak_lr, solving for
+    model_size gives model_size = 1 / (peak_lr**2 * warmup).
+    """
+    total_steps = max_epochs * iters_per_epoch
+    warmup = max(1, round(total_steps * warmup_fraction))
+    model_size = max(1, round(1 / (peak_lr ** 2 * warmup)))
+    return model_size, warmup
 
 
 def setup_optimizer(args: SimpleNamespace, model: Module) -> optim:

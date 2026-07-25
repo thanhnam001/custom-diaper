@@ -60,6 +60,7 @@ class InferenceArgs:
     att_qty_reg_loss_weight: float
     condition_frame_encoder: bool
     conformer_conv_kernel_size: int
+    conv_norm_type: str
     context_activations: bool
     context_size: int
     d_latents: int
@@ -134,6 +135,11 @@ def parse_arguments() -> InferenceArgs:
     parser.add_argument('--conformer-conv-kernel-size', default=3, type=int,
                         help='depthwise-conv kernel size for the conformer '
                         'frame encoder (must be odd)')
+    parser.add_argument('--conv-norm-type', default='batchnorm', type=str,
+                        choices=['batchnorm', 'layernorm'],
+                        help='normalization used inside the conformer '
+                        'frame encoder\'s ConvolutionModule; must match '
+                        'the value the model was trained with')
     parser.add_argument('--context-activations', type=bool, default=False)
     parser.add_argument('--context-size', type=int)
     parser.add_argument('--d-latents', type=int,

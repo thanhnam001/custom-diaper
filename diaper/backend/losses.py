@@ -360,3 +360,33 @@ def get_attractor_quantity_loss(
         torch.from_numpy(n_speakers).to(attractors_logits.device).double()
     )
     return attractor_loss
+
+
+def attractor_diversity_loss(vectors: torch.Tensor) -> torch.Tensor:
+    """Orthogonality/diversity penalty on a set of attractor-like vectors:
+    normalizes them, builds their cosine-similarity (Gram) matrix, and
+    penalizes its deviation from the identity -- pushing the vectors apart
+    so distinct speakers don't collapse onto near-identical attractors.
+
+    Ported from Master/src/training/losses/diaper/loss.py::AttractorDiversityLoss.
+
+    vectors: `(N, D)` for a single shared set (e.g. model.latent_attractors)
+          or `(B, N, D)` for a per-sequence set (e.g. per-batch attractors),
+    averaged over the batch in the latter case.
+    """
+    q = F.normalize(vectors, dim=-1)
+    if vectors.dim() == 2:
+        n = vectors.shape[0]
+        gram = torch.matmul(q, q.transpose(0, 1))
+        identity = torch.eye(n, device=vectors.device, dtype=vectors.dtype)
+        return torch.norm(gram - identity, p='fro')
+    elif vectors.dim() == 3:
+        n = vectors.shape[1]
+        gram = torch.bmm(q, q.transpose(1, 2))
+        identity = torch.eye(
+            n, device=vectors.device, dtype=vectors.dtype).unsqueeze(0)
+        return torch.norm(gram - identity, dim=(1, 2)).mean()
+    else:
+        raise ValueError(
+            "attractor_diversity_loss expects a 2D or 3D tensor, got "
+            f"{vectors.dim()}D")

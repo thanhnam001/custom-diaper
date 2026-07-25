@@ -1,0 +1,74 @@
+# Stage 1/3: pretrain on 2-speaker LibriSpeech-simulated conversations (500h).
+# Same recipe as models/10attractors/SC_LibriSpeech_2spk/train.yaml, but with
+# latents2attractors: linear (the buggy nn.Linear axis mismatch in
+# backend/models.py::get_attractors is now fixed -- see git history) instead
+# of weighted_average, plus the attractor/latent diversity loss
+# (backend/losses.py::attractor_diversity_loss) enabled.
+#
+# noam_model_size / noam_warmup_steps are intentionally omitted: train.py now
+# auto-computes them from max_epochs * (precomputed train set size /
+# train_batchsize) with a 10% warmup fraction (noam_warmup_fraction default)
+# and a validated peak LR (noam_peak_lr default, see
+# diaper/common_utils/noam_lr_calc.py) -- no manual recompute needed.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_diversity_loss_weight: 0.01 # starting point -- watch the
+  # attractor_diversity_loss TensorBoard scalar and retune; the latent set
+  # (n_latents=128) and attractor set (n_attractors=10) are summed under one
+  # weight and their raw Frobenius-norm magnitudes differ by roughly an
+  # order of magnitude (more latents -> larger norm), so this weight is a
+  # compromise, not a per-term-tuned value.
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 96
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: self_attention
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+latents2attractors: linear
+log_report_batches_num: 256 # need recompute if batch size/dataset size change
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 600
+num_speakers: 2
+num_workers: 4
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_linear_diversity_pretrain500h
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 120
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_500h_fixed_2spks
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_500h_fixed_2spks_validation

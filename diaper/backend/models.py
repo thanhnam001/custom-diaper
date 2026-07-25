@@ -37,15 +37,41 @@ def save_checkpoint(
     optimizer: NoamOpt,
     loss: torch.Tensor
 ) -> None:
-    Path(f"{args.output_path}/models").mkdir(parents=True, exist_ok=True)
+    models_dir = Path(f"{args.output_path}/models")
+    models_dir.mkdir(parents=True, exist_ok=True)
 
     torch.save({
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss},
-        f"{args.output_path}/models/checkpoint_{epoch}.tar"
+        models_dir / f"checkpoint_{epoch}.tar"
     )
+    # Default of 30 (rather than requiring the attribute) keeps this safe
+    # for any other caller that builds an args namespace without the CLI
+    # flag below.
+    prune_checkpoints(models_dir, getattr(args, 'keep_last_n_checkpoints', 30))
+
+
+def prune_checkpoints(models_dir: Path, keep_last_n: int) -> None:
+    """Delete all but the `keep_last_n` most recently written
+    checkpoint_*.tar files in `models_dir`. Ordered by mtime (not by the
+    epoch number in the filename) so this covers epoch-boundary and
+    --save-intermediate checkpoints uniformly, including fractional-epoch
+    filenames (checkpoint_5.23.tar) that don't sort correctly as strings.
+    keep_last_n <= 0 disables pruning (keep everything).
+
+    Note: if you rely on --init-epochs referencing specific old epochs
+    (average_checkpoints) for a later training stage, make sure
+    keep_last_n is large enough that those checkpoints are still around
+    once this stage finishes.
+    """
+    if keep_last_n <= 0:
+        return
+    checkpoints = sorted(
+        models_dir.glob("checkpoint_*.tar"), key=lambda p: p.stat().st_mtime)
+    for stale in checkpoints[:-keep_last_n]:
+        stale.unlink()
 
 
 def load_checkpoint(args: SimpleNamespace, filename: str):
@@ -252,13 +278,26 @@ class PositionwiseFeedForward(torch.nn.Module):
 
 class ConvolutionModule(torch.nn.Module):
     """ Conformer convolution module: pointwise conv -> GLU -> depthwise
-    conv -> batchnorm -> SiLU -> pointwise conv.
+    conv -> {batchnorm,layernorm} -> SiLU -> pointwise conv.
+
+    conv_norm_type picks the normalization applied right after the
+    depthwise conv: 'batchnorm' (default, the original Conformer recipe) or
+    'layernorm' (normalizes per (batch, time) position instead of mixing
+    statistics across the batch/time axes -- avoids batch-size-dependent
+    behavior and, unlike BatchNorm1d's running stats, needs no train/eval
+    mode distinction). Both are kept under the same `self.batch_norm`
+    attribute name so a config left at the 'batchnorm' default produces an
+    identical state dict to before this option existed -- existing
+    checkpoints trained with the old hardcoded BatchNorm1d still load.
 
     Note: like the rest of the model, this does not mask out padded frames
     (see backend/losses.py::pad_sequence, which fills padding with -1) --
     the depthwise conv will locally mix a few padded frames into valid ones
     within kernel_size // 2 positions of the true/padding boundary, the same
     class of limitation as the model's existing unmasked self-attention.
+    With 'batchnorm', padded frames (if any reach this module unmasked)
+    also skew the per-channel batch/time statistics; 'layernorm' does not
+    have this failure mode since it normalizes each position independently.
     """
 
     def __init__(
@@ -267,12 +306,16 @@ class ConvolutionModule(torch.nn.Module):
         d_latents: int,
         kernel_size: int,
         dropout: float,
+        conv_norm_type: str = 'batchnorm',
     ) -> None:
         super(ConvolutionModule, self).__init__()
         assert kernel_size % 2 == 1, \
             f"kernel_size must be odd for symmetric padding, got {kernel_size}"
+        assert conv_norm_type in ('batchnorm', 'layernorm'), \
+            f"conv_norm_type must be 'batchnorm' or 'layernorm', got {conv_norm_type}"
         self.device = device
         self.dropout = dropout
+        self.conv_norm_type = conv_norm_type
         self.layer_norm = torch.nn.LayerNorm(d_latents, device=self.device)
         self.pointwise_conv1 = torch.nn.Conv1d(
             d_latents, 2 * d_latents, kernel_size=1, device=self.device)
@@ -280,7 +323,12 @@ class ConvolutionModule(torch.nn.Module):
             d_latents, d_latents, kernel_size=kernel_size,
             padding=(kernel_size - 1) // 2, groups=d_latents,
             device=self.device)
-        self.batch_norm = torch.nn.BatchNorm1d(d_latents, device=self.device)
+        if conv_norm_type == 'batchnorm':
+            self.batch_norm = torch.nn.BatchNorm1d(
+                d_latents, device=self.device)
+        else:
+            self.batch_norm = torch.nn.LayerNorm(
+                d_latents, device=self.device)
         self.pointwise_conv2 = torch.nn.Conv1d(
             d_latents, d_latents, kernel_size=1, device=self.device)
 
@@ -291,7 +339,12 @@ class ConvolutionModule(torch.nn.Module):
         x = self.pointwise_conv1(x)  # (B, 2F, T)
         x = F.glu(x, dim=1)  # (B, F, T)
         x = self.depthwise_conv(x)  # (B, F, T)
-        x = self.batch_norm(x)
+        if self.conv_norm_type == 'layernorm':
+            # LayerNorm normalizes the last dim -- go channel-last for the
+            # norm, then back to channel-first for the rest of the module.
+            x = self.batch_norm(x.transpose(1, 2)).transpose(1, 2)
+        else:
+            x = self.batch_norm(x)
         x = F.silu(x)
         x = self.pointwise_conv2(x)  # (B, F, T)
         x = F.dropout(x, self.dropout, training=self.training)
@@ -315,6 +368,7 @@ class ConformerBlock(torch.nn.Module):
         d_units: int,
         kernel_size: int,
         dropout: float,
+        conv_norm_type: str = 'batchnorm',
     ) -> None:
         super(ConformerBlock, self).__init__()
         self.device = device
@@ -326,7 +380,7 @@ class ConformerBlock(torch.nn.Module):
         self.mhsa = MultiHeadSelfAttention(
             self.device, d_latents, n_heads, dropout)
         self.conv_module = ConvolutionModule(
-            self.device, d_latents, kernel_size, dropout)
+            self.device, d_latents, kernel_size, dropout, conv_norm_type)
         self.ff2_lnorm = torch.nn.LayerNorm(d_latents, device=self.device)
         self.ff2 = PositionwiseFeedForward(
             self.device, d_latents, d_units, dropout)
@@ -487,7 +541,8 @@ class AttractorPerceiver(torch.nn.Module):
                                        args.frame_encoder_heads,
                                        args.frame_encoder_units,
                                        args.conformer_conv_kernel_size,
-                                       args.dropout_frames)
+                                       args.dropout_frames,
+                                       args.conv_norm_type)
                     )
                 else:
                     setattr(
@@ -784,9 +839,23 @@ class AttractorPerceiver(torch.nn.Module):
         #     per_prcvblock_latents = per_prcvblock_latents.to(
         #         torch.device("cuda"))
         for i in range(len(per_prcvblock_latents)):
-            if type(self.latents2attractors) is LinearCombination:
+            if self.lat2att == 'weighted_average':
                 attractors_i, l2a_entropy_term_i = self.latents2attractors(
                     per_prcvblock_latents[i])
+            elif self.lat2att == 'linear':
+                # nn.Linear only ever contracts the LAST axis, but the
+                # n_latents -> n_attractors mix needs to happen on axis 1
+                # (n_latents), not axis 2 (d_latents) -- per_prcvblock_latents[i]
+                # is (B, n_latents, d_latents). Applying the Linear straight to
+                # that tensor silently contracts d_latents instead (it only
+                # avoids a shape-mismatch crash when d_latents happens to equal
+                # n_latents), scrambling feature values across the latent-slot
+                # axis rather than combining across latents. Transpose so
+                # n_latents is last, apply, transpose back -- same axis
+                # convention as LinearCombination.forward above.
+                attractors_i = self.latents2attractors(
+                    per_prcvblock_latents[i].transpose(1, 2)).transpose(1, 2)
+                l2a_entropy_term_i = torch.zeros(1)[0]
             else:
                 attractors_i = self.latents2attractors(
                     per_prcvblock_latents[i]).transpose(1, 2)

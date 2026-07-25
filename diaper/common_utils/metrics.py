@@ -115,6 +115,7 @@ def new_metrics() -> Dict[str, float]:
         'vad_loss',
         'osd_loss',
         'spkid_loss',
+        'attractor_diversity_loss',
         'avg_ref_spk_qty',
         'avg_pred_spk_qty',
         'DER_FA',

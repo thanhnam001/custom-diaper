@@ -25,6 +25,7 @@ sys.path.insert(
 import common_utils.collections_abc_compat  # noqa: E402,F401
 
 from backend.losses import (
+    attractor_diversity_loss,
     get_loss,
     pad_labels_zeros,
     pad_sequence
@@ -35,7 +36,7 @@ from backend.models import (
     load_checkpoint,
     save_checkpoint,
 )
-from backend.updater import setup_optimizer, get_rate
+from backend.updater import compute_noam_params, setup_optimizer, get_rate
 from common_utils.diarization_dataset import (
     KaldiDiarizationDataset,
     PrecomputedDiarizationDataset)
@@ -148,6 +149,21 @@ def compute_loss_and_metrics(
 
     l2a_entropy_term = per_prcvblock_l2a_entropy_term[-1]
 
+    if args.attractor_diversity_loss_weight == 0:
+        attractor_diversity_loss_value = torch.zeros((), device=inputs.device)
+    else:
+        # Applied to the shared latent_attractors parameter (once, not
+        # per-layer -- it's a single global parameter) and to the final
+        # layer's per-sequence attractors; unlike activation/existence
+        # losses, this is not repeated for the intermediate frame-encoder/
+        # perceiver layers below.
+        base_model = model.module if hasattr(model, 'module') else model
+        attractor_diversity_loss_value = (
+            attractor_diversity_loss(base_model.latent_attractors) +
+            attractor_diversity_loss(
+                per_frameenclayer_attractors[:, :, :, -1])
+        )
+
     if args.intermediate_loss_frameencoder:
         intermediate_activation_losses_BCE = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
         intermediate_activation_losses_DER = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
@@ -244,7 +260,8 @@ def compute_loss_and_metrics(
         att_qty_loss * args.att_qty_loss_weight + \
         vad_loss * args.vad_loss_weight + \
         osd_loss * args.osd_loss_weight + \
-        spkid_loss * args.speakerid_loss_weight
+        spkid_loss * args.speakerid_loss_weight + \
+        attractor_diversity_loss_value * args.attractor_diversity_loss_weight
 
     if not torch.isfinite(loss):
         # keep the accumulators clean; the caller skips the update for
@@ -274,6 +291,8 @@ def compute_loss_and_metrics(
     acum_metrics['vad_loss'] += vad_loss.item()
     acum_metrics['osd_loss'] += osd_loss.item()
     acum_metrics['spkid_loss'] += spkid_loss.item()
+    acum_metrics['attractor_diversity_loss'] += \
+        attractor_diversity_loss_value.item()
     return loss, acum_metrics
 
 
@@ -452,10 +471,22 @@ def parse_arguments() -> SimpleNamespace:
                         type=str, choices=['dotprod', 'xattention'],
                         help='how are attractors and frame embeddings compared')
     parser.add_argument('--att-qty-loss-weight', default=0.0, type=float)
+    parser.add_argument('--attractor-diversity-loss-weight', default=0.0,
+                        type=float, help='weighting parameter for the '
+                        'attractor/latent orthogonality (diversity) '
+                        'penalty; see backend/losses.py::'
+                        'attractor_diversity_loss')
     parser.add_argument('--condition-frame-encoder', type=bool, default=True)
     parser.add_argument('--conformer-conv-kernel-size', default=3, type=int,
                         help='depthwise-conv kernel size for the conformer '
                         'frame encoder (must be odd)')
+    parser.add_argument('--conv-norm-type', default='batchnorm', type=str,
+                        choices=['batchnorm', 'layernorm'],
+                        help='normalization used inside the conformer '
+                        'frame encoder\'s ConvolutionModule, after the '
+                        'depthwise conv (only takes effect when '
+                        '--frame-encoder-type=conformer); see '
+                        'backend/models.py::ConvolutionModule')
     parser.add_argument('--context-activations', type=bool, default=False)
     parser.add_argument('--context-size', type=int)
     parser.add_argument('--d-latents', type=int, default=None,
@@ -507,6 +538,13 @@ def parse_arguments() -> SimpleNamespace:
                         choices=['logmel', 'logmel_meannorm',
                                  'logmel_meanvarnorm'],
                         help='input normalization transform')
+    parser.add_argument('--keep-last-n-checkpoints', default=30, type=int,
+                        help='rolling checkpoint retention: after each '
+                        'save, delete all but the N most recently written '
+                        'checkpoint_*.tar files in <output_path>/models '
+                        '(covers both epoch-boundary and '
+                        '--save-intermediate checkpoints). <= 0 disables '
+                        'pruning and keeps every checkpoint.')
     parser.add_argument('--intermediate-loss-frameencoder', default=False, type=bool)
     parser.add_argument('--intermediate-loss-perceiver', default=False, type=bool)
     parser.add_argument('--length-normalize', default=False, type=bool)
@@ -559,8 +597,24 @@ def parse_arguments() -> SimpleNamespace:
                         help='number of output cross-attention heads')
     parser.add_argument('--n-speakers-softmax', type=int, default=0,
                         help='number of speakers to train speaker loss')
-    parser.add_argument('--noam-model-size', type=int)
-    parser.add_argument('--noam-warmup-steps', type=float)
+    parser.add_argument('--noam-model-size', type=int, default=None,
+                        help='if left unset (together with '
+                        '--noam-warmup-steps), auto-computed from '
+                        '--max-epochs, the training dataloader length, '
+                        '--noam-warmup-fraction and --noam-peak-lr -- see '
+                        'backend/updater.py::compute_noam_params')
+    parser.add_argument('--noam-warmup-steps', type=float, default=None)
+    parser.add_argument('--noam-warmup-fraction', default=0.10, type=float,
+                        help='fraction of total training steps '
+                        '(max_epochs * len(train_loader)) spent ramping up '
+                        'the noam LR schedule; only used to auto-compute '
+                        'noam_warmup_steps when it is not set explicitly')
+    parser.add_argument('--noam-peak-lr', default=9.882e-5, type=float,
+                        help='target peak LR for the auto-computed noam '
+                        'schedule; only used when noam_model_size/'
+                        'noam_warmup_steps are not set explicitly (default '
+                        'is the validated value from common_utils/'
+                        'noam_lr_calc.py)')
     parser.add_argument('--norm-loss-per-spk', type=bool, default=False)
     parser.add_argument('--num-frames', type=int,
                         help='number of frames in one utterance')
@@ -667,27 +721,44 @@ if __name__ == '__main__':
     else:
         args.device = torch.device("cpu")
 
-    if args.init_model_path == '':
-        model = get_model(args)
-        optimizer = setup_optimizer(args, model)
-    else:
-        model = get_model(args)
+    model = get_model(args)
+    if args.init_model_path != '':
         model = average_checkpoints(
             args.device, model, args.init_model_path, args.init_epochs)
-        optimizer = setup_optimizer(args, model)
 
+    # Built before optimizer setup: auto-computing the noam schedule below
+    # needs the training dataloader's length (iters per epoch).
     train_loader, dev_loader = get_training_dataloaders(args)
+
+    if args.optimizer == 'noam' and (
+            args.noam_model_size is None or args.noam_warmup_steps is None):
+        iters_per_epoch = len(train_loader)
+        args.noam_model_size, args.noam_warmup_steps = compute_noam_params(
+            args.max_epochs, iters_per_epoch,
+            args.noam_warmup_fraction, args.noam_peak_lr)
+        total_steps = args.max_epochs * iters_per_epoch
+        logging.info(
+            f"Auto-computed noam schedule from {args.max_epochs} epochs x "
+            f"{iters_per_epoch} iters/epoch = {total_steps} total steps: "
+            f"noam_model_size={args.noam_model_size}, "
+            f"noam_warmup_steps={args.noam_warmup_steps} "
+            f"({100 * args.noam_warmup_steps / total_steps:.1f}% of total)")
+
+    optimizer = setup_optimizer(args, model)
 
     acum_train_metrics = new_metrics()
     acum_dev_metrics = new_metrics()
 
-    if os.path.isfile(os.path.join(
-            args.output_path, 'models', 'checkpoint_0.tar')):
+    # Checked by listing checkpoint_* files rather than testing specifically
+    # for checkpoint_0.tar: with --keep-last-n-checkpoints pruning, epoch 0
+    # is not special and may itself have been deleted by the time a run is
+    # resumed, so its absence must not be mistaken for "never started".
+    directory = os.path.join(args.output_path, 'models')
+    checkpoints = os.listdir(directory) if os.path.isdir(directory) else []
+    paths = [os.path.join(directory, basename) for
+             basename in checkpoints if basename.startswith("checkpoint_")]
+    if paths:
         # Load latest model and continue from there
-        directory = os.path.join(args.output_path, 'models')
-        checkpoints = os.listdir(directory)
-        paths = [os.path.join(directory, basename) for
-                 basename in checkpoints if basename.startswith("checkpoint_")]
         paths.sort(key=lambda x: os.path.getmtime(x))
         latest = paths[-1]
         epoch, model, optimizer, _ = load_checkpoint(args, latest)
