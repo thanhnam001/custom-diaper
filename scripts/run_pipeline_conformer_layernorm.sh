@@ -25,7 +25,10 @@ set -e
 # almost immediately instead of retraining.
 
 CONFIG_DIR="models/10attractors/SC_LibriSpeech_2spk_conformer_layernorm"
-export CUDA_VISIBLE_DEVICES=0
+# Respects an already-set CUDA_VISIBLE_DEVICES from the calling shell (e.g.
+# `CUDA_VISIBLE_DEVICES=1 ./scripts/run_pipeline_conformer_layernorm.sh`),
+# falling back to GPU 0 only if the caller didn't set one.
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 run_stage () {
     local name="$1"
