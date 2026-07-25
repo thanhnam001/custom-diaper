@@ -57,7 +57,7 @@ seed: 3
 specaugment: False
 subsampling: 10
 time_shuffle: False
-train_batchsize: 20
+train_batchsize: 16
 train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/train
 use_frame_selfattention: True
 use_posenc: False
