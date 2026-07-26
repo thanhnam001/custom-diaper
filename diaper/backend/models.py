@@ -311,8 +311,6 @@ class ConvolutionModule(torch.nn.Module):
         super(ConvolutionModule, self).__init__()
         assert kernel_size % 2 == 1, \
             f"kernel_size must be odd for symmetric padding, got {kernel_size}"
-        assert conv_norm_type in ('batchnorm', 'layernorm'), \
-            f"conv_norm_type must be 'batchnorm' or 'layernorm', got {conv_norm_type}"
         self.device = device
         self.dropout = dropout
         self.conv_norm_type = conv_norm_type
@@ -326,9 +324,13 @@ class ConvolutionModule(torch.nn.Module):
         if conv_norm_type == 'batchnorm':
             self.batch_norm = torch.nn.BatchNorm1d(
                 d_latents, device=self.device)
-        else:
+        elif conv_norm_type == 'layernorm':
             self.batch_norm = torch.nn.LayerNorm(
                 d_latents, device=self.device)
+        else:
+            raise ValueError(
+                "conv_norm_type must be 'batchnorm' or 'layernorm', got "
+                f"{conv_norm_type}")
         self.pointwise_conv2 = torch.nn.Conv1d(
             d_latents, d_latents, kernel_size=1, device=self.device)
 

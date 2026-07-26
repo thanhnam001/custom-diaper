@@ -27,6 +27,7 @@ import common_utils.collections_abc_compat  # noqa: E402,F401
 from backend.losses import (
     attractor_diversity_loss,
     get_loss,
+    masked_attractor_diversity_loss,
     pad_labels_zeros,
     pad_sequence
 )
@@ -134,7 +135,8 @@ def compute_loss_and_metrics(
         att_qty_loss,
         vad_loss,
         osd_loss,
-        spkid_loss
+        spkid_loss,
+        exists_mask
     ) = get_loss(
         per_frameenclayer_ys_logits[:, :, :, -1],
         labels,
@@ -152,17 +154,21 @@ def compute_loss_and_metrics(
     if args.attractor_diversity_loss_weight == 0:
         attractor_diversity_loss_value = torch.zeros((), device=inputs.device)
     else:
-        # Applied to the shared latent_attractors parameter (once, not
-        # per-layer -- it's a single global parameter) and to the final
-        # layer's per-sequence attractors; unlike activation/existence
-        # losses, this is not repeated for the intermediate frame-encoder/
-        # perceiver layers below.
-        base_model = model.module if hasattr(model, 'module') else model
-        attractor_diversity_loss_value = (
-            attractor_diversity_loss(base_model.latent_attractors) +
-            attractor_diversity_loss(
-                per_frameenclayer_attractors[:, :, :, -1])
-        )
+        # Applied to the final layer's per-sequence attractors only (masked
+        # down to attractor slots that actually match a real speaker this
+        # batch, via exists_mask from the PIT permutation -- see
+        # losses.py::masked_attractor_diversity_loss); unlike
+        # activation/existence losses, this is not repeated for the
+        # intermediate frame-encoder/perceiver layers below.
+        #
+        # base_model = model.module if hasattr(model, 'module') else model
+        # attractor_diversity_loss_value = (
+        #     attractor_diversity_loss(base_model.latent_attractors) +
+        #     masked_attractor_diversity_loss(
+        #         per_frameenclayer_attractors[:, :, :, -1], exists_mask)
+        # )
+        attractor_diversity_loss_value = masked_attractor_diversity_loss(
+            per_frameenclayer_attractors[:, :, :, -1], exists_mask)
 
     if args.intermediate_loss_frameencoder:
         intermediate_activation_losses_BCE = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
@@ -181,7 +187,8 @@ def compute_loss_and_metrics(
                 att_qty_loss_j,
                 vad_loss_j,
                 osd_loss_j,
-                spkid_loss_j
+                spkid_loss_j,
+                _
             ) = get_loss(
                 per_frameenclayer_ys_logits[:, :, :, j],
                 labels,
@@ -225,7 +232,8 @@ def compute_loss_and_metrics(
                 att_qty_loss_i,
                 vad_loss_i,
                 osd_loss_i,
-                spkid_loss_i
+                spkid_loss_i,
+                _
             ) = get_loss(
                 per_prcvblock_ys_logits[:, :, :, i],
                 labels,
@@ -254,7 +262,7 @@ def compute_loss_and_metrics(
         spkid_loss += torch.mean(intermediate_spkid_losses)
 
     loss = activation_loss_BCE * args.activation_loss_BCE_weight + \
-        l2a_entropy_term + \
+        l2a_entropy_term * args.l2a_entropy_loss_weight + \
         activation_loss_DER * args.activation_loss_DER_weight + \
         attractor_existence_loss * args.attractor_existence_loss_weight + \
         att_qty_loss * args.att_qty_loss_weight + \
@@ -472,10 +480,11 @@ def parse_arguments() -> SimpleNamespace:
                         help='how are attractors and frame embeddings compared')
     parser.add_argument('--att-qty-loss-weight', default=0.0, type=float)
     parser.add_argument('--attractor-diversity-loss-weight', default=0.0,
-                        type=float, help='weighting parameter for the '
-                        'attractor/latent orthogonality (diversity) '
-                        'penalty; see backend/losses.py::'
-                        'attractor_diversity_loss')
+                        type=float, help='weighting parameter for '
+                        'masked_attractor_diversity_loss, the existence-'
+                        'mask-restricted attractor orthogonality (diversity) '
+                        'penalty on the final layer per-sequence attractors; '
+                        'see backend/losses.py')
     parser.add_argument('--condition-frame-encoder', type=bool, default=True)
     parser.add_argument('--conformer-conv-kernel-size', default=3, type=int,
                         help='depthwise-conv kernel size for the conformer '
@@ -552,6 +561,17 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--lr', type=float)
     parser.add_argument('--latents2attractors', type=str, default='dummy',
                         choices=['dummy', 'linear', 'weighted_average'])
+    parser.add_argument('--l2a-entropy-loss-weight', default=1.0, type=float,
+                        help='weighting parameter for the '
+                        'latents2attractors: weighted_average entropy term '
+                        '(per_prcvblock_l2a_entropy_term, pushes the '
+                        'latent->attractor combination weights towards '
+                        'one-hot); a no-op for latents2attractors: dummy/'
+                        'linear, where that term is always 0. Default 1.0 '
+                        'preserves the old unweighted (implicitly '
+                        'always-on) behavior for existing configs; set to '
+                        '0.0 to drop it entirely, e.g. in favor of '
+                        'attractor-diversity-loss-weight instead')
     parser.add_argument('--max-epochs', type=int,
                         help='Max. number of epochs to train')
     parser.add_argument('--min-length', default=0, type=int,

@@ -171,13 +171,22 @@ def pit_loss_multispk(
 
     # Pick first dimensions, in case they mismatch because the data has more
     # speakers than the model has attractors
+    min_dim = min(attractors_logits.shape[1], spk_labels.shape[1])
     attractor_existence_loss = F.binary_cross_entropy_with_logits(
-        attractors_logits[:, :min(attractors_logits.shape[1], spk_labels.shape[1])],
-        spk_labels[:, :min(attractors_logits.shape[1], spk_labels.shape[1])],
+        attractors_logits[:, :min_dim],
+        spk_labels[:, :min_dim],
         reduction='mean')
 
+    # Same attractor-slot-aligned existence target as above, zero-padded out
+    # to the full attractor count (attractors_logits.shape[1]) for slots
+    # beyond min_dim -- those never received existence supervision this
+    # batch, so masked_attractor_diversity_loss should treat them as absent
+    # rather than guessing.
+    exists_mask = torch.zeros_like(attractors_logits)
+    exists_mask[:, :min_dim] = spk_labels[:, :min_dim]
+
     return (activation_loss, activation_loss_DER, attractor_existence_loss,
-            torch.stack(permutations).to(logits.device))
+            exists_mask, torch.stack(permutations).to(logits.device))
 
 
 def get_silence_probs(ys_silence_probs: torch.Tensor):
@@ -289,7 +298,7 @@ def get_loss(
         spk_labels = spk_labels.to(torch.device("cuda"))
 
     (activation_loss, activation_loss_DER,
-        attractor_existence_loss, permutations) = pit_loss_multispk(
+        attractor_existence_loss, exists_mask, permutations) = pit_loss_multispk(
         logits_padded, ts_padded, attractors_logits, n_speakers, args)
     if not (args.speakerid_loss == ''):
         spkid_loss = speaker_identification_loss(
@@ -317,7 +326,8 @@ def get_loss(
         att_qty_loss,
         vad_loss_value,
         osd_loss_value,
-        spkid_loss
+        spkid_loss,
+        exists_mask
         )
 
 
@@ -390,3 +400,39 @@ def attractor_diversity_loss(vectors: torch.Tensor) -> torch.Tensor:
         raise ValueError(
             "attractor_diversity_loss expects a 2D or 3D tensor, got "
             f"{vectors.dim()}D")
+
+
+def masked_attractor_diversity_loss(
+    attractors: torch.Tensor,
+    exists_mask: torch.Tensor
+) -> torch.Tensor:
+    """Orthogonality/diversity penalty restricted to attractor slots that
+    actually correspond to a real speaker in this sequence, per the PIT
+    permutation (see pit_loss_multispk's `exists_mask` return value).
+
+    Unlike attractor_diversity_loss (which penalizes the Gram matrix's full
+    deviation from the identity, including slots with no speaker -- those
+    still contribute rows/columns of near-zero, arbitrary-direction vectors
+    that add noise to the penalty), this masks the pairwise similarity terms
+    down to valid-vs-valid attractor pairs only, so unused attractor slots
+    (common once n_attractors > the batch's max speaker count) don't affect
+    the loss.
+
+    attractors:  `(B, A, D)` per-sequence attractors (e.g. the final layer's
+        per_frameenclayer_attractors/per_prcvblock_attractors).
+    exists_mask: `(B, A)` 1/0 mask, attractor-slot-aligned (i.e. already
+        permuted into attractor order), same as the target passed to the
+        attractor_existence_loss BCE.
+    """
+    q = F.normalize(attractors, dim=-1)
+    gram = torch.bmm(q, q.transpose(1, 2))  # (B, A, A)
+
+    m = exists_mask.to(gram.dtype).detach()  # (B, A)
+    pair = m.unsqueeze(2) * m.unsqueeze(1)  # valid x valid
+    eye = torch.eye(gram.shape[1], device=gram.device, dtype=gram.dtype)
+    pair = pair * (1.0 - eye)  # drop diagonal
+
+    n_pairs = pair.sum(dim=(1, 2))  # = n(n-1) per sample
+    per_sample = ((gram ** 2) * pair).sum(dim=(1, 2)) / n_pairs.clamp(min=1.0)
+    per_sample = per_sample * (n_pairs > 0)  # no valid pairs -> 0
+    return per_sample.mean()

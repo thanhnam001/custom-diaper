@@ -1,0 +1,65 @@
+# Inference config for the RAMC-finetuned checkpoint of this pipeline
+# (finetune_ramc_10spks.yaml's output_path/models_finetuneRAMC/models).
+# Architecture options here must match train_10spks.yaml /
+# finetune_ramc_10spks.yaml in this directory (conformer frame encoder,
+# conv kernel size 3, latents2attractors: weighted_average) --
+# l2a_entropy_loss_weight and attractor_diversity_loss_weight are
+# training-only loss terms and have no effect on inference, so they are not
+# repeated here.
+#
+# epochs is intentionally left out: pass it on the command line once you
+# know which checkpoint(s) to average (e.g. from the best dev-loss epoch in
+# TensorBoard, since this stage trains with early_stopping over up to 500
+# epochs rather than a fixed epoch count). infer_data_dir/models_path/
+# rttms_dir below have working defaults but can also be overridden the same
+# way. Example:
+#
+#   python diaper/infer.py \
+#       -c models/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_maskeddiversity/infer_ramc.yaml \
+#       --epochs 450-500 \
+#       --infer-data-dir /path/to/other/test/set \
+#       --models-path /path/to/other/models \
+#       --rttms-dir /path/to/output
+
+# inference options
+condition_frame_encoder: True
+conformer_conv_kernel_size: 3
+context_size: 7
+d_latents: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+estimate_spk_qty: -1
+estimate_spk_qty_thr: 0.5
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+gpu: 1
+infer_data_dir: /data/ocr/namvt17/dataset/diarization/ramc/kaldi/test
+input_transform: logmel_meannorm
+latents2attractors: weighted_average
+median_window_length: 1
+model_type: AttractorPerceiver
+models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_maskeddiversity_300h_maximum10spks/models_finetuneRAMC/models
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+num_frames: -1
+num_speakers: 10
+pre_xa_heads: 4
+rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_adapted1-10_conformer_maskeddiversity_300h_maximum10spks/models_finetuneRAMC/ramc_test_pred
+sampling_rate: 16000
+seed: 3
+subsampling: 5
+time_shuffle: False
+threshold: 0.5
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
