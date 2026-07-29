@@ -39,6 +39,7 @@ from os.path import join
 from pathlib import Path
 from tqdm import tqdm
 from train import _convert
+import copy
 import librosa
 import logging
 import matplotlib.pyplot as plt
@@ -78,6 +79,7 @@ class InferenceArgs:
     frame_size: int
     frame_shift: int
     gpu: int
+    fallback_cpu_oom: bool
     hidden_size: int
     infer_data_dir: str
     input_transform: str
@@ -166,6 +168,11 @@ def parse_arguments() -> InferenceArgs:
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--gpu', '-g', default=-1, type=int,
                         help='GPU ID (negative value indicates CPU)')
+    parser.add_argument('--fallback-cpu-oom', default=False, type=bool,
+                        help='if a GPU forward pass raises a CUDA '
+                        'out-of-memory error (typically on unusually long '
+                        'recordings), retry that single recording on CPU '
+                        'instead of skipping it. Has no effect if --gpu < 1.')
     parser.add_argument('--hidden-size', type=int,
                         help='number of units in SA blocks')
     parser.add_argument('--infer-data-dir', help='inference data directory \
@@ -294,7 +301,24 @@ if __name__ == '__main__':
 
     model = average_checkpoints(
         args.device, model, args.models_path, args.epochs)
+    model = model.to(args.device)
     model.eval()
+
+    # Optional per-recording fallback: some files are long enough that a
+    # single forward pass exceeds available VRAM even though most fit fine.
+    # Rather than aborting the whole run, retry just that one recording on
+    # a CPU copy of the model kept around for this purpose.
+    cpu_model = None
+    if args.fallback_cpu_oom:
+        if args.device.type != "cuda":
+            logging.warning(
+                "--fallback-cpu-oom has no effect when --gpu < 1 "
+                "(already running on CPU)")
+        else:
+            cpu_model = copy.deepcopy(
+                model.module if hasattr(model, "module") else model
+            ).to("cpu")
+            cpu_model.eval()
 
     out_dir = join(
         args.rttms_dir,
@@ -322,44 +346,71 @@ if __name__ == '__main__':
             filepaths = list(Path(wav_dir).rglob('*.wav'))
     print('Total file', len(filepaths))
     for filepath in tqdm(filepaths):
-        duration = librosa.get_duration(filename=filepath)
-        # duration = min(duration, 60.0)
-        # 100 frames per second, because later we will multiply with args.frame_shift=160, meaning 0.1s in 16kHz
-        # and we want to have 100 frames per second in the plot
-        file_frames_length = int((100*duration) // 1) 
-        data, samplerate = sf.read(
-            filepath, start=0, stop=(file_frames_length * args.frame_shift))
-        Y = stft(data, args.frame_size, args.frame_shift)
-        Y = transform(
-            Y, args.sampling_rate, args.feature_dim, args.input_transform, False) 
-        Y_spliced = splice(Y, args.context_size)
-        Y_ss, _ = subsample(Y_spliced, Y_spliced, args.subsampling)
-
-        input = torch.from_numpy(np.asarray([Y_ss])).to(args.device)
-        with torch.no_grad():
-            (
-                y_pred,
-                existence_probs,
-                per_prcvblock_latents,
-                per_prcvblock_attractors,
-                y_probs
-            ) = estimate_diarization_outputs(model, input, args)
-        # Each one has a single sequence
-        y_pred = y_pred[0]
-        existence_probs = existence_probs[0]
-        y_probs = y_probs[0]
-        # first attractor and latent -> why not all of them?
-        per_prcvblock_attractors = torch.stack([a[0] for a in per_prcvblock_attractors]) # (B, d_latents, n_blocks)
-        per_prcvblock_latents = torch.stack([lat[0] for lat in per_prcvblock_latents]) # (B, d_latents, n_blocks)
-        post_y = postprocess_output(
-            y_pred, args.subsampling,
-            args.threshold, args.median_window_length,
-            args.normalize_probs)
-        #  rttm_filename = join(out_dir, f"{args.wav_name}.rttm")
-        rttm_filename = out_dir / filepath.with_suffix('.rttm').name
         wav_name = filepath.stem
-        with open(rttm_filename, 'w') as rttm_file:
-            hard_labels_to_rttm(post_y, wav_name, rttm_file)
+        try:
+            duration = librosa.get_duration(filename=filepath)
+            # duration = min(duration, 60.0)
+            # 100 frames per second, because later we will multiply with args.frame_shift=160, meaning 0.1s in 16kHz
+            # and we want to have 100 frames per second in the plot
+            file_frames_length = int((100*duration) // 1)
+            data, samplerate = sf.read(
+                filepath, start=0, stop=(file_frames_length * args.frame_shift))
+            Y = stft(data, args.frame_size, args.frame_shift)
+            Y = transform(
+                Y, args.sampling_rate, args.feature_dim, args.input_transform, False)
+            Y_spliced = splice(Y, args.context_size)
+            Y_ss, _ = subsample(Y_spliced, Y_spliced, args.subsampling)
+        except Exception as e:
+            logging.error(f"{wav_name}: feature extraction failed: {e}")
+            continue
+
+        try:
+            input = torch.from_numpy(np.asarray([Y_ss])).to(args.device)
+            with torch.no_grad():
+                (
+                    y_pred,
+                    existence_probs,
+                    per_prcvblock_latents,
+                    per_prcvblock_attractors,
+                    y_probs
+                ) = estimate_diarization_outputs(model, input, args)
+        except RuntimeError as e:
+            if cpu_model is None or "out of memory" not in str(e).lower():
+                logging.error(f"{wav_name}: inference failed: {e}")
+                continue
+            logging.warning(
+                f"{wav_name}: CUDA out of memory, retrying this recording "
+                "on CPU")
+            torch.cuda.empty_cache()
+            input = torch.from_numpy(np.asarray([Y_ss])).to("cpu")
+            with torch.no_grad():
+                (
+                    y_pred,
+                    existence_probs,
+                    per_prcvblock_latents,
+                    per_prcvblock_attractors,
+                    y_probs
+                ) = estimate_diarization_outputs(cpu_model, input, args)
+
+        try:
+            # Each one has a single sequence
+            y_pred = y_pred[0]
+            existence_probs = existence_probs[0]
+            y_probs = y_probs[0]
+            # first attractor and latent -> why not all of them?
+            per_prcvblock_attractors = torch.stack([a[0] for a in per_prcvblock_attractors]) # (B, d_latents, n_blocks)
+            per_prcvblock_latents = torch.stack([lat[0] for lat in per_prcvblock_latents]) # (B, d_latents, n_blocks)
+            post_y = postprocess_output(
+                y_pred, args.subsampling,
+                args.threshold, args.median_window_length,
+                args.normalize_probs)
+            #  rttm_filename = join(out_dir, f"{args.wav_name}.rttm")
+            rttm_filename = out_dir / filepath.with_suffix('.rttm').name
+            with open(rttm_filename, 'w') as rttm_file:
+                hard_labels_to_rttm(post_y, wav_name, rttm_file)
+        except Exception as e:
+            logging.error(f"{wav_name}: postprocessing failed: {e}")
+            continue
         if args.plot_output:
             fig, axs = plt.subplots(y_probs.shape[1]+1)
             fig.set_figwidth(y_probs.shape[0]/100)

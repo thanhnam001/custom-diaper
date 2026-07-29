@@ -111,6 +111,7 @@ def new_metrics() -> Dict[str, float]:
         'l2a_entropy_term',
         'activation_loss_DER',
         'attractor_existence_loss',
+        'attractor_accuracy',
         'att_qty_loss',
         'vad_loss',
         'osd_loss',

@@ -100,7 +100,8 @@ def _format_metrics(metrics: Dict[str, float], n: float) -> str:
         f"(miss={avg['DER_miss']:.2f} fa={avg['DER_FA']:.2f} "
         f"conf={avg['DER_conf']:.2f}) "
         f"spk_qty(ref/pred)={avg['avg_ref_spk_qty']:.2f}/"
-        f"{avg['avg_pred_spk_qty']:.2f}"
+        f"{avg['avg_pred_spk_qty']:.2f} "
+        f"attractor_acc={avg['attractor_accuracy']:.2f}%"
     )
 
 
@@ -286,10 +287,19 @@ def compute_loss_and_metrics(
     active_attractors = (existence_probs > args.estimate_spk_qty_thr).float()
     y_probs_gated = y_probs * active_attractors.unsqueeze(1)
 
+    # Per-attractor-slot existence accuracy: exists_mask is the PIT-aligned
+    # ground truth (same attractor-slot order as active_attractors, see
+    # pit_loss_multispk), so slots can be compared directly without
+    # re-deriving a permutation.
+    attractor_accuracy = (
+        active_attractors.detach() == exists_mask.detach()
+    ).float().mean().item() * 100
+
     metrics = calculate_metrics(
         labels.detach(), y_probs_gated.detach(), threshold=0.5)
 
     acum_metrics = update_metrics(acum_metrics, metrics)
+    acum_metrics['attractor_accuracy'] += attractor_accuracy
     acum_metrics['loss'] += loss.item()
     acum_metrics['activation_loss_BCE'] += activation_loss_BCE.item()
     acum_metrics['l2a_entropy_term'] += l2a_entropy_term.item()

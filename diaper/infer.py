@@ -36,6 +36,7 @@ from types import SimpleNamespace
 from typing import List, TextIO, Tuple
 from scipy.signal import medfilt
 from tqdm import tqdm
+import copy
 import logging
 import matplotlib.pyplot as plt
 import numpy as np
@@ -306,6 +307,11 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--gpu', '-g', default=-1, type=int,
                         help='GPU ID (negative value indicates CPU)')
+    parser.add_argument('--fallback-cpu-oom', default=False, type=bool,
+                        help='if a GPU forward pass raises a CUDA '
+                        'out-of-memory error (typically on unusually long '
+                        'recordings), retry that single recording on CPU '
+                        'instead of skipping it. Has no effect if --gpu < 1.')
     parser.add_argument('--hidden-size', type=int,
                         help='number of units in SA blocks')
     parser.add_argument('--infer-data-dir', help='inference data directory.')
@@ -422,7 +428,24 @@ if __name__ == '__main__':
 
     model = average_checkpoints(
         args.device, model, args.models_path, args.epochs)
+    model = model.to(args.device)
     model.eval()
+
+    # Optional per-sample fallback: some recordings are long enough that a
+    # single forward pass exceeds available VRAM even though most fit fine.
+    # Rather than aborting the whole run, retry just that one recording on
+    # a CPU copy of the model kept around for this purpose.
+    cpu_model = None
+    if args.fallback_cpu_oom:
+        if args.device.type != "cuda":
+            logging.warning(
+                "--fallback-cpu-oom has no effect when --gpu < 1 "
+                "(already running on CPU)")
+        else:
+            cpu_model = copy.deepcopy(
+                model.module if hasattr(model, "module") else model
+            ).to("cpu")
+            cpu_model.eval()
 
     out_dir = join(
         args.rttms_dir,
@@ -439,9 +462,9 @@ if __name__ == '__main__':
 
     infer_pbar = tqdm(infer_loader, total=len(infer_loader))
     for batch in infer_pbar:
+        name = batch['names'][0]
         try:
             input = torch.stack(batch['xs']).to(args.device)
-            name = batch['names'][0]
             with torch.no_grad():
                 (
                     y_pred,
@@ -450,6 +473,25 @@ if __name__ == '__main__':
                     per_prcvblock_attractors,
                     y_probs
                 ) = estimate_diarization_outputs(model, input, args)
+        except RuntimeError as e:
+            if cpu_model is None or "out of memory" not in str(e).lower():
+                logging.error(f"{name}: inference failed: {e}")
+                continue
+            logging.warning(
+                f"{name}: CUDA out of memory, retrying this recording on "
+                "CPU")
+            torch.cuda.empty_cache()
+            input = torch.stack(batch['xs']).to("cpu")
+            with torch.no_grad():
+                (
+                    y_pred,
+                    existence_probs,
+                    per_prcvblock_latents,
+                    per_prcvblock_attractors,
+                    y_probs
+                ) = estimate_diarization_outputs(cpu_model, input, args)
+
+        try:
             # Each one has a single sequence
             y_pred = y_pred[0]
             existence_probs = existence_probs[0]
@@ -464,8 +506,9 @@ if __name__ == '__main__':
             with open(rttm_filename, 'w', encoding='UTF-8') as rttm_file:
                 hard_labels_to_rttm(post_y, name, rttm_file)
             torch.cuda.empty_cache()
-        except:
-            print(name)
+        except Exception as e:
+            logging.error(f"{name}: postprocessing failed: {e}")
+            continue
         if args.plot_output:
             fig, axs = plt.subplots(y_probs.shape[1]+1)
             fig.set_figwidth(y_probs.shape[0]/100)
