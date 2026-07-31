@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 # Zip experiment folders into a single archive for transfer, keeping only
-# the N most recent checkpoints per experiment (tensorboard logs / configs /
-# everything else under each exp folder is zipped unchanged). Originals are
-# never modified.
+# the N most recent checkpoints per checkpoint dir (tensorboard logs /
+# configs / everything else is zipped unchanged). Originals are never
+# modified.
 #
 # Usage:
 #   python scripts/zip_experiments.py ROOT [ROOT ...] -o OUT.zip [--keep-n 10]
 #
-# Each ROOT is searched recursively for experiment directories (any folder
-# containing a models/ subdir, e.g. <output_path> from train.yaml -- ROOT
-# itself counts if it directly has one). All experiments found across all
-# ROOTs go into one archive, each stored under a path relative to that
-# ROOT's parent (so same-named experiments in different families don't
-# collide). Checkpoints under <exp_dir>/models/checkpoint_*.tar are ranked
+# Every directory literally named `models` anywhere under a ROOT (at any
+# depth) is treated as an independent checkpoint dir and pruned on its own
+# -- this covers not just a plain pretrain/adapt exp's own <output_path>/
+# models/, but also sibling finetune stages whose output_path points *inside*
+# that same exp dir, e.g. <adapt_exp>/models_finetuneRAMC/models/ and
+# <adapt_exp>/models_finetuneMSDWILD/models/ sitting next to the adapt
+# stage's own <adapt_exp>/models/. Checkpoints (checkpoint_*.tar) are ranked
 # by the epoch number embedded in the filename (models.py's
 # save_checkpoint() writes `checkpoint_{epoch}.tar`, epoch a float) rather
 # than mtime, since mtime doesn't survive a copy/rsync intact; only the
-# --keep-n highest-epoch checkpoints are included per experiment.
+# --keep-n highest-epoch checkpoints per models/ dir are included.
+#
+# Everything found across all ROOTs goes into one archive, each file stored
+# under a path relative to its ROOT's parent (so same-named dirs under
+# different ROOTs don't collide).
 
 import argparse
 import os
@@ -29,38 +34,46 @@ from tqdm import tqdm
 CHECKPOINT_RE = re.compile(r'^checkpoint_(-?\d+(?:\.\d+)?)\.tar$')
 
 
-def checkpoint_epoch(path: Path) -> float:
+def checkpoint_epoch(path: Path):
     m = CHECKPOINT_RE.match(path.name)
-    if not m:
-        raise ValueError(f"unrecognized checkpoint filename: {path}")
-    return float(m.group(1))
+    return float(m.group(1)) if m else None
 
 
-def discover_experiment_dirs(root: Path):
-    """Find every dir under (and including) root that has a models/
-    subdir. Stops descending once one is found, so a models/ subfolder
-    inside an experiment (there isn't one, but just in case) can't itself
-    be mistaken for a separate nested experiment."""
-    if (root / 'models').is_dir():
-        return [root]
-    found = []
-    for dirpath, dirnames, _ in os.walk(root):
-        p = Path(dirpath)
-        if (p / 'models').is_dir():
-            found.append(p)
-            dirnames[:] = []
-    return found
+def find_models_dirs(root: Path):
+    """Every dir literally named `models` at or under root, regardless of
+    nesting depth (unlike os.walk pruning, does NOT stop descending once
+    one is found -- a finetune stage's models/ can sit inside its parent
+    exp dir, alongside that exp's own models/)."""
+    dirs = [p for p in root.rglob('models') if p.is_dir()]
+    if root.name == 'models':
+        dirs.append(root)
+    return dirs
 
 
-def checkpoints_to_skip(exp_dir: Path, keep_n: int) -> set:
-    models_dir = exp_dir / 'models'
-    if not models_dir.is_dir() or keep_n <= 0:
-        return set()
-    checkpoints = sorted(
-        models_dir.glob('checkpoint_*.tar'), key=checkpoint_epoch)
-    if len(checkpoints) <= keep_n:
-        return set()
-    return set(checkpoints[:-keep_n])
+def checkpoints_to_skip(models_dir: Path, keep_n: int) -> set:
+    all_ckpts = list(models_dir.glob('checkpoint_*.tar'))
+    dated = []
+    unparseable = []
+    for p in all_ckpts:
+        epoch = checkpoint_epoch(p)
+        if epoch is None:
+            unparseable.append(p)
+        else:
+            dated.append((epoch, p))
+
+    if unparseable:
+        print(f"  {models_dir}: {len(unparseable)} checkpoint file(s) "
+              "don't match `checkpoint_<epoch>.tar` -- keeping them "
+              f"unconditionally: {[p.name for p in unparseable]}")
+
+    skip = set()
+    if keep_n > 0 and len(dated) > keep_n:
+        dated.sort(key=lambda t: t[0])
+        skip = {p for _, p in dated[:-keep_n]}
+
+    print(f"  {models_dir}: {len(all_ckpts)} checkpoint(s) found, "
+          f"keeping {len(all_ckpts) - len(skip)}, skipping {len(skip)}")
+    return skip
 
 
 def collect_files(roots, keep_n: int):
@@ -76,27 +89,30 @@ def collect_files(roots, keep_n: int):
         if not root.is_dir():
             print(f"skipping {root}: not a directory")
             continue
-        exp_dirs = discover_experiment_dirs(root)
-        if not exp_dirs:
-            print(f"skipping {root}: no experiment (dir with a models/ "
-                  "subdir) found under it")
-            continue
-        for exp_dir in exp_dirs:
-            skip = checkpoints_to_skip(exp_dir, keep_n)
-            n_checkpoints_skipped += len(skip)
-            for p in exp_dir.rglob('*'):
-                if p in skip:
-                    continue
-                if p.is_symlink():
-                    # Not dereferenced -- matches `du`'s default (no
-                    # --dereference) and avoids silently pulling a
-                    # symlink's target (which may live entirely outside
-                    # exp_dir, e.g. a shared init checkpoint) into the
-                    # archive.
-                    n_symlinks_skipped += 1
-                    print(f"    skipping symlink {p} -> {os.readlink(p)}")
-                elif p.is_file():
-                    file_list.append((p, p.relative_to(root.parent)))
+
+        models_dirs = find_models_dirs(root)
+        if not models_dirs:
+            print(f"note: no `models` dir found anywhere under {root} "
+                  "-- nothing will be pruned, everything gets zipped as-is")
+
+        skip = set()
+        for models_dir in models_dirs:
+            this_skip = checkpoints_to_skip(models_dir, keep_n)
+            n_checkpoints_skipped += len(this_skip)
+            skip |= this_skip
+
+        for p in root.rglob('*'):
+            if p in skip:
+                continue
+            if p.is_symlink():
+                # Not dereferenced -- matches `du`'s default (no
+                # --dereference) and avoids silently pulling a symlink's
+                # target (which may live entirely outside root, e.g. a
+                # shared init checkpoint) into the archive.
+                n_symlinks_skipped += 1
+                print(f"    skipping symlink {p} -> {os.readlink(p)}")
+            elif p.is_file():
+                file_list.append((p, p.relative_to(root.parent)))
 
     return file_list, n_checkpoints_skipped, n_symlinks_skipped
 
@@ -122,12 +138,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('exp_dirs', nargs='+', type=Path,
                          help='experiment folders, or roots to search '
-                         'recursively for experiment folders')
+                         'recursively for `models` checkpoint dirs')
     parser.add_argument('-o', '--out', type=Path, required=True,
                          help='output .zip path')
     parser.add_argument('--keep-n', type=int, default=10,
-                         help='most recent checkpoints to keep per exp '
-                         '(default: 10); <= 0 keeps every checkpoint')
+                         help='most recent checkpoints to keep per models/ '
+                         'dir (default: 10); <= 0 keeps every checkpoint')
     parser.add_argument('--compress-level', type=int, default=None,
                          choices=range(0, 10), metavar='0-9',
                          help='enable DEFLATE compression at this level '
