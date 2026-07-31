@@ -16,6 +16,8 @@ import argparse
 import zipfile
 from pathlib import Path
 
+from tqdm import tqdm
+
 
 def checkpoints_to_skip(exp_dir: Path, keep_n: int) -> set:
     models_dir = exp_dir / 'models'
@@ -31,16 +33,18 @@ def checkpoints_to_skip(exp_dir: Path, keep_n: int) -> set:
 
 def zip_experiment(exp_dir: Path, out_path: Path, keep_n: int) -> None:
     skip = checkpoints_to_skip(exp_dir, keep_n)
+    files = [p for p in exp_dir.rglob('*') if p.is_file() and p not in skip]
+    total_bytes = sum(p.stat().st_size for p in files)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    n_files = 0
-    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for path in exp_dir.rglob('*'):
-            if path.is_dir() or path in skip:
-                continue
+    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zf, \
+            tqdm(total=total_bytes, unit='B', unit_scale=True,
+                 desc=exp_dir.name) as pbar:
+        for path in files:
             zf.write(path, path.relative_to(exp_dir.parent))
-            n_files += 1
+            pbar.update(path.stat().st_size)
     print(f"{exp_dir.name}: wrote {out_path} "
-          f"({n_files} files, skipped {len(skip)} old checkpoints)")
+          f"({len(files)} files, skipped {len(skip)} old checkpoints)")
 
 
 def main():
