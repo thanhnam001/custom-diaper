@@ -806,6 +806,17 @@ if __name__ == '__main__':
 
     for epoch in range(int(round(init_epoch)), args.max_epochs):
         model.train()
+        # Discard any partial-window leftovers from the previous epoch's
+        # tail (len(train_loader) is rarely an exact multiple of
+        # log_report_batches_num): acum_train_metrics is otherwise only
+        # reset inside the periodic-report block below, which is keyed off
+        # `i` -- and `i` restarts at 0 every epoch, so without this a
+        # leftover partial sum would get added on top of a fresh window and
+        # then divided by the same fixed log_report_batches_num denominator,
+        # inflating every train_* metric (most visibly attractor_accuracy,
+        # which has a hard 100% ceiling per batch and so can't legitimately
+        # exceed 100% otherwise).
+        acum_train_metrics = reset_metrics(acum_train_metrics)
         train_pbar = tqdm(train_loader, total=len(train_loader))
         for i, batch in enumerate(train_pbar):
             train_batches_qty += 1
