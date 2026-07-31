@@ -13,16 +13,27 @@
 # ROOTs go into one archive, each stored under a path relative to that
 # ROOT's parent (so same-named experiments in different families don't
 # collide). Checkpoints under <exp_dir>/models/checkpoint_*.tar are ranked
-# by mtime (mirrors the sort train.py itself uses to find the latest
-# checkpoint, see train.py's `paths.sort(key=lambda x: os.path.getmtime(x))`);
-# only the --keep-n newest are included per experiment.
+# by the epoch number embedded in the filename (models.py's
+# save_checkpoint() writes `checkpoint_{epoch}.tar`, epoch a float) rather
+# than mtime, since mtime doesn't survive a copy/rsync intact; only the
+# --keep-n highest-epoch checkpoints are included per experiment.
 
 import argparse
 import os
+import re
 import zipfile
 from pathlib import Path
 
 from tqdm import tqdm
+
+CHECKPOINT_RE = re.compile(r'^checkpoint_(-?\d+(?:\.\d+)?)\.tar$')
+
+
+def checkpoint_epoch(path: Path) -> float:
+    m = CHECKPOINT_RE.match(path.name)
+    if not m:
+        raise ValueError(f"unrecognized checkpoint filename: {path}")
+    return float(m.group(1))
 
 
 def discover_experiment_dirs(root: Path):
@@ -46,8 +57,7 @@ def checkpoints_to_skip(exp_dir: Path, keep_n: int) -> set:
     if not models_dir.is_dir() or keep_n <= 0:
         return set()
     checkpoints = sorted(
-        models_dir.glob('checkpoint_*.tar'),
-        key=lambda p: p.stat().st_mtime)
+        models_dir.glob('checkpoint_*.tar'), key=checkpoint_epoch)
     if len(checkpoints) <= keep_n:
         return set()
     return set(checkpoints[:-keep_n])
