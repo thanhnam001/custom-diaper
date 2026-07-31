@@ -31,13 +31,21 @@ def checkpoints_to_skip(exp_dir: Path, keep_n: int) -> set:
     return set(checkpoints[:-keep_n])
 
 
-def zip_experiment(exp_dir: Path, out_path: Path, keep_n: int) -> None:
+def zip_experiment(
+    exp_dir: Path, out_path: Path, keep_n: int, compress_level
+) -> None:
     skip = checkpoints_to_skip(exp_dir, keep_n)
     files = [p for p in exp_dir.rglob('*') if p.is_file() and p not in skip]
     total_bytes = sum(p.stat().st_size for p in files)
 
+    if compress_level is None:
+        zip_kwargs = dict(compression=zipfile.ZIP_STORED)
+    else:
+        zip_kwargs = dict(
+            compression=zipfile.ZIP_DEFLATED, compresslevel=compress_level)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zf, \
+    with zipfile.ZipFile(out_path, 'w', **zip_kwargs) as zf, \
             tqdm(total=total_bytes, unit='B', unit_scale=True,
                  desc=exp_dir.name) as pbar:
         for path in files:
@@ -56,6 +64,14 @@ def main():
     parser.add_argument('--keep-n', type=int, default=10,
                          help='most recent checkpoints to keep per exp '
                          '(default: 10); <= 0 keeps every checkpoint')
+    parser.add_argument('--compress-level', type=int, default=None,
+                         choices=range(0, 10), metavar='0-9',
+                         help='enable DEFLATE compression at this level '
+                         '(default: off, i.e. ZIP_STORED). Checkpoint '
+                         'tensors barely compress, so the default just '
+                         'stores files uncompressed for speed; only set '
+                         'this if the archive is mostly compressible '
+                         'non-checkpoint data and you want a smaller file.')
     args = parser.parse_args()
 
     for exp_dir in args.exp_dirs:
@@ -63,7 +79,9 @@ def main():
         if not exp_dir.is_dir():
             print(f"skipping {exp_dir}: not a directory")
             continue
-        zip_experiment(exp_dir, args.out_dir / f"{exp_dir.name}.zip", args.keep_n)
+        zip_experiment(
+            exp_dir, args.out_dir / f"{exp_dir.name}.zip",
+            args.keep_n, args.compress_level)
 
 
 if __name__ == '__main__':
