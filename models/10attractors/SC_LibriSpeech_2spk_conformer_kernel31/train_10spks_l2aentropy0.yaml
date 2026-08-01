@@ -1,0 +1,99 @@
+# Stage 2/3 (variant): adapt the 2-speaker pretrained model to 1-10 speakers,
+# same as train_10spks.yaml in this directory, but with
+# l2a_entropy_loss_weight: 0.0 instead of the implicit default 1.0.
+#
+# Why: dev-set analysis of the finetune_msdwild_10spks.yaml checkpoint
+# (attractor-existence branch, see attractor_collapse analysis) found that
+# latents2attractors.weights sits at ~99.7% of its theoretical max entropy
+# for ALL 10 attractor slots -- i.e. the latent->attractor softmax
+# combination never specializes, it stays a near-uniform average over all
+# 128 latents everywhere. l2a_entropy_term (models.py's
+# xlogy(w,w).mean(dim=0).sum()) equals -H(w) (up to a positive scale), and
+# train.py adds it to the loss as `+ l2a_entropy_term *
+# l2a_entropy_loss_weight` with a positive weight -- minimizing the loss
+# therefore *rewards* driving entropy_term as negative as possible, i.e.
+# rewards uniform (max-entropy) weights. That is the opposite of this
+# argument's own docstring ("pushes the latent->attractor combination
+# weights towards one-hot"), and since the weight has been implicitly
+# always-on (default 1.0) since stage 1 pretraining, it has plausibly been
+# fighting attractor-slot specialization for the whole pipeline.
+#
+# This config isolates that one variable (l2a_entropy_loss_weight: 0.0,
+# i.e. drop the term entirely) to test the hypothesis at the stage where it
+# actually matters: stage 1 (2-speaker pretrain) never needs more than 2 of
+# the 10 slots to differentiate, but stage 2 is where the model first has
+# to spread real speakers across up to 10 slots on 300h of 1-10-speaker
+# data. init_model_path/init_epochs below are unchanged from
+# train_10spks.yaml -- this warm-starts from the *existing* stage-1
+# pretrain500h checkpoint, no need to redo stage 1.
+#
+# output_path is a NEW directory (train.py auto-resumes from the latest
+# checkpoint found in output_path, so reusing the old
+# adapted1-10_300h_maximum10spks path would just resume that run at epoch
+# 100 with the old, uncorrected loss).
+#
+# After this stage finishes, re-run finetune_msdwild_10spks.yaml (and/or
+# finetune_ramc_10spks.yaml) with their init_model_path pointed at this
+# config's output_path/models instead.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 16
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+l2a_entropy_loss_weight: 0.0
+latents2attractors: weighted_average
+log_report_batches_num: 20
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 2400
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_l2aentropy0
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 16
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/validation
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_pretrain500h/models
