@@ -24,7 +24,7 @@
 # latents2attractors other than weighted_average, see that arg's
 # docstring in train.py) so it's simply omitted rather than set to 0.
 #
-# attractor_diversity_loss_weight: 1.0 (was 0.0/unset in every prior
+# attractor_diversity_loss_weight: 0.1 (was 0.0/unset in every prior
 # config) is combined with the MLP change here rather than tested
 # separately. Reasoning: the MLP change only removes the architectural
 # CEILING on how different two slots' vectors can be -- nothing in the
@@ -41,11 +41,41 @@
 # gradient-conflict problem, which masked_attractor_diversity_loss
 # (backend/losses.py) addresses directly by penalizing squared cosine
 # similarity between Hungarian-matched slots' vectors, whereas MLP
-# capacity alone does not. 1.0 matches the scale of this config's other
-# loss weights (activation_loss_BCE_weight,
-# attractor_existence_loss_weight are both 1.0 too) as a starting point --
-# watch the attractor_diversity_loss TensorBoard scalar and retune if it's
-# clearly dominating or being ignored relative to those.
+# capacity alone does not.
+#
+# 0.1, not 1.0: attractor_diversity_loss_weight: 0.01 already got
+# linear_diversity's slots fully separated (all pairwise cos < 0.28) --
+# that architecture has no combination-weight ceiling either
+# (latents2attractors: linear is sign-unconstrained, same as mlp).
+# 0.1 (the weight used for weighted_average+masked-diversity, which only
+# got a partial fix because weighted_average's convex-combination ceiling
+# fought the loss the whole time) is already 10x that proven-sufficient
+# value, so it's a safer starting point now that mlp removes the ceiling
+# this loss was fighting -- no evidence yet that 1.0 is needed, and it's
+# a second unproven variable on top of the architecture change. Watch the
+# attractor_diversity_loss TensorBoard scalar against activation_loss_BCE/
+# attractor_existence_loss for the first 10-15 epochs and raise it only if
+# it's clearly not moving (cluster still visible in a mid-training
+# attractor_collapse_analysis.py pass).
+#
+# intermediate_loss_perceiver: False (was True in every prior config):
+# n_blocks_attractors PerceiverEncoders are chained SEQUENTIALLY
+# (backend/models.py::PerceiverBlock.__call__ feeds block i's output
+# latents into block i+1) -- one refinement pipeline, not independent
+# parallel heads, so there's little vanishing-gradient case for deep
+# supervision at only 3 blocks. Meanwhile self.counter (the existence
+# head) is a SINGLE nn.Linear shared across every block with no per-block
+# parameters; intermediate_loss_perceiver forces that one shared
+# classifier to score block 1's still-underdifferentiated attractors and
+# block 3's fully-refined ones equally, every step -- the same
+# shared-weight gradient-conflict mechanism described above for the
+# attractor_diversity_loss_weight change, just recurring along the block
+# axis instead of the slot axis. Dropping it removes one more plausible
+# contributor to the existence head's inaccuracy instead of leaving it as
+# an uncontrolled variable. intermediate_loss_frameencoder is left on --
+# condition_frame_encoder interleaves attractor conditioning back into
+# each frame-encoder layer, so those are genuinely separate
+# estimation/detection cycles, not one shared-bottleneck refinement stack.
 #
 # Checkpoint compatibility: init_model_path below still points at stage
 # 1's pretrain500h checkpoints, which were trained with
@@ -72,7 +102,7 @@ activation_loss_BCE_weight: 1.0
 activation_loss_DER_weight: 0.0
 attractor_existence_loss_weight: 1.0
 attractor_frame_comparison: dotprod
-attractor_diversity_loss_weight: 1.0
+attractor_diversity_loss_weight: 0.1
 allow_partial_warmstart: True
 condition_frame_encoder: True
 conformer_conv_kernel_size: 31
@@ -95,7 +125,7 @@ gpu: 1
 gradclip: 5
 input_transform: logmel_meannorm
 intermediate_loss_frameencoder: True
-intermediate_loss_perceiver: True
+intermediate_loss_perceiver: False
 latents2attractors: mlp
 log_report_batches_num: 20
 max_epochs: 100
