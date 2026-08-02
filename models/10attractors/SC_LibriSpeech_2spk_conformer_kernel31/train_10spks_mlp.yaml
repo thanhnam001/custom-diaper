@@ -1,0 +1,131 @@
+# Stage 2 (variant): adapt the 2-speaker pretrained model to 1-10 speakers,
+# same as train_10spks.yaml, but replaces latents2attractors: weighted_average
+# with latents2attractors: mlp.
+#
+# Why: attractor_collapse_analysis.py on the weighted_average MSDWild
+# finetune (even with l2a_entropy_loss_weight: 0, see
+# finetune_msdwild_10spks_l2aentropy0.yaml) showed 6/10 attractor slots
+# converged to near-parallel vectors (pairwise cosine similarity up to
+# 0.99), all with near-zero existence probability regardless of context --
+# because latents2attractors.weights (the softmax-normalized latent ->
+# attractor combination) stayed at near-maximum entropy (~4.84 of max
+# 4.852) throughout, every slot ends up as roughly the same convex
+# combination of the same ~125 latents, hence near-identical vectors, and
+# self.counter (the existence head) is a SINGLE linear layer shared across
+# all 10 slots with no per-slot parameters -- its only way to score two
+# slots differently is if their attractor vectors differ. weighted_average
+# structurally caps how differentiated those vectors can get (strictly
+# convex combination, sign-constrained). latents2attractors: mlp
+# (backend/models.py::MLPCombination, two-layer GELU MLP applied along the
+# n_latents axis) removes that constraint -- each slot gets its own
+# learned nonlinear, sign-unconstrained function of all 128 latents.
+#
+# l2a_entropy_loss_weight is irrelevant here (no-op for any
+# latents2attractors other than weighted_average, see that arg's
+# docstring in train.py) so it's simply omitted rather than set to 0.
+#
+# attractor_diversity_loss_weight: 1.0 (was 0.0/unset in every prior
+# config) is combined with the MLP change here rather than tested
+# separately. Reasoning: the MLP change only removes the architectural
+# CEILING on how different two slots' vectors can be -- nothing in the
+# existing losses gives the optimizer any reason to actually push them
+# apart. Evidence this matters, not just theory: in the
+# weighted_average+l2a-entropy-0 MSDWild run, slot 0 was Hungarian-matched
+# to a real reference speaker in 245/330 dev chunks (i.e. exists_mask=1
+# most of the time, strong "should exist" gradient) yet its mean existence
+# probability was 0.040 -- because slot 0's vector sits close (cos sim
+# 0.79-0.94) to the {1,5,6,9} cluster that's usually correctly silent, and
+# self.counter is one linear layer shared across all 10 slots, so the
+# "should exist" gradient from slot 0 and the "should be silent" gradient
+# from its near-duplicates fight through the same weights. That's a
+# gradient-conflict problem, which masked_attractor_diversity_loss
+# (backend/losses.py) addresses directly by penalizing squared cosine
+# similarity between Hungarian-matched slots' vectors, whereas MLP
+# capacity alone does not. 1.0 matches the scale of this config's other
+# loss weights (activation_loss_BCE_weight,
+# attractor_existence_loss_weight are both 1.0 too) as a starting point --
+# watch the attractor_diversity_loss TensorBoard scalar and retune if it's
+# clearly dominating or being ignored relative to those.
+#
+# Checkpoint compatibility: init_model_path below still points at stage
+# 1's pretrain500h checkpoints, which were trained with
+# latents2attractors: weighted_average. That submodule's checkpoint
+# tensors (key: latents2attractors.weights) don't exist under the new MLP
+# module's parameter names (latents2attractors.fc1.*/fc2.*), so a normal
+# strict load_state_dict would error. allow_partial_warmstart: True makes
+# average_checkpoints (backend/models.py) skip just the incompatible
+# latents2attractors.* tensors -- keeping their fresh random init -- while
+# still warm-starting everything else (frame encoder, encoder_attractors,
+# latent_attractors, counter) from stage 1 as normal. Expect a
+# "average_checkpoints: --allow-partial-warmstart is set; skipping ..."
+# log line naming exactly those latents2attractors keys at startup; if
+# anything else shows up in that skip list, stop and investigate before
+# training -- that would mean an unrelated architecture mismatch is being
+# silently masked, not the intended one.
+#
+# After this stage finishes, pick a best-dev-loss epoch range from
+# TensorBoard and point a finetune_{msdwild,ramc}_10spks_mlp.yaml (mirroring
+# the existing *_l2aentropy0 finetune configs) at this output_path/models.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 1.0
+allow_partial_warmstart: True
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 16
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+latents2attractors: mlp
+log_report_batches_num: 20
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 2400
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_mlp
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 16
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/validation
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_pretrain500h/models

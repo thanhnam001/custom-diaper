@@ -570,7 +570,25 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--log-report-batches-num', default=1, type=float)
     parser.add_argument('--lr', type=float)
     parser.add_argument('--latents2attractors', type=str, default='dummy',
-                        choices=['dummy', 'linear', 'weighted_average'])
+                        choices=['dummy', 'linear', 'weighted_average', 'mlp'])
+    parser.add_argument('--l2a-mlp-hidden-dim', type=int, default=None,
+                        help='hidden layer width for latents2attractors: '
+                        'mlp (two-layer MLP, GELU, applied along the '
+                        'n_latents axis); unused for other '
+                        'latents2attractors options. Defaults to n_latents '
+                        'if unset.')
+    parser.add_argument('--allow-partial-warmstart', type=bool, default=False,
+                        help='when warm-starting via --init-model-path/'
+                        '--init-epochs (average_checkpoints), tolerate '
+                        'checkpoint tensors whose key or shape no longer '
+                        'matches the current model (e.g. after changing '
+                        'latents2attractors architecture) by skipping just '
+                        'those tensors and keeping their fresh random '
+                        'init, instead of the default strict '
+                        'load_state_dict error. Off by default so an '
+                        'unrelated init-model-path/architecture mismatch '
+                        'still fails loudly instead of silently training '
+                        'on a partially-random model.')
     parser.add_argument('--l2a-entropy-loss-weight', default=1.0, type=float,
                         help='weighting parameter for the '
                         'latents2attractors: weighted_average entropy term '
@@ -754,7 +772,8 @@ if __name__ == '__main__':
     model = get_model(args)
     if args.init_model_path != '':
         model = average_checkpoints(
-            args.device, model, args.init_model_path, args.init_epochs)
+            args.device, model, args.init_model_path, args.init_epochs,
+            allow_partial=args.allow_partial_warmstart)
 
     # Built before optimizer setup: auto-computing the noam schedule below
     # needs the training dataloader's length (iters per epoch).

@@ -101,20 +101,56 @@ def get_model(args: SimpleNamespace) -> torch.nn.Module:
     return torch.nn.DataParallel(model)
 
 
+def _filter_compatible_state_dict(
+    ckpt_state: Dict[str, torch.Tensor],
+    own_state: Dict[str, torch.Tensor],
+) -> Tuple[Dict[str, torch.Tensor], List[str]]:
+    """Drop any checkpoint tensor whose key is absent from the current
+    model or whose shape doesn't match `own_state`, so a warm-start
+    checkpoint from a structurally different submodule (e.g.
+    latents2attractors changed from weighted_average to mlp) can still be
+    loaded: the mismatched submodule keeps its own fresh random init
+    instead of load_state_dict erroring. Returns (filtered_state, skipped).
+    """
+    filtered = {}
+    skipped = []
+    for key, tensor in ckpt_state.items():
+        if key in own_state and own_state[key].shape == tensor.shape:
+            filtered[key] = tensor
+        else:
+            skipped.append(key)
+    return filtered, skipped
+
+
 def average_checkpoints(
     device: torch.device,
     model: torch.nn.Module,
     models_path: str,
-    epochs: str
+    epochs: str,
+    allow_partial: bool = False,
 ) -> torch.nn.Module:
     epochs = parse_epochs(epochs)
     states_dict_list = []
+    own_state = model.state_dict()
     for e in epochs:
         copy_model = copy.deepcopy(model)
         checkpoint = torch.load(join(
             models_path,
             f"checkpoint_{e}.tar"), map_location=device)
-        copy_model.load_state_dict(checkpoint['model_state_dict'])
+        ckpt_state = checkpoint['model_state_dict']
+        if allow_partial:
+            ckpt_state, skipped = _filter_compatible_state_dict(
+                ckpt_state, own_state)
+            if skipped:
+                logging.warning(
+                    "average_checkpoints: --allow-partial-warmstart is "
+                    "set; skipping %d checkpoint tensor(s) incompatible "
+                    "with the current model architecture for epoch %s "
+                    "(kept randomly-initialized instead): %s",
+                    len(skipped), e, skipped)
+            copy_model.load_state_dict(ckpt_state, strict=False)
+        else:
+            copy_model.load_state_dict(ckpt_state)
         states_dict_list.append(copy_model.state_dict())
     avg_state_dict = average_states(states_dict_list, device)
     avg_model = copy.deepcopy(model)
@@ -493,6 +529,34 @@ class LinearCombination(torch.nn.Module):
             weights_normalized).permute(0, 2, 1), entropy_term
 
 
+class MLPCombination(torch.nn.Module):
+    """Nonlinear latents -> attractors map: a two-layer MLP (GELU) applied
+    along the n_latents axis. Unlike LinearCombination (a softmax-weighted,
+    strictly convex combination of the latents -- sign-constrained, and
+    prone to every output slot converging to near-uniform weights, i.e.
+    near-identical vectors, see train_10spks_l2aentropy0.yaml's header),
+    this has no such constraint: each attractor slot gets its own learned
+    nonlinear function of all 128 latents, sign-unconstrained, strictly
+    more capacity to produce mutually distinct per-slot vectors.
+    """
+
+    def __init__(
+        self, in_dim: int, out_dim: int, hidden_dim: int, device: torch.device
+    ):
+        self.device = device
+        super(MLPCombination, self).__init__()
+        self.fc1 = torch.nn.Linear(in_dim, hidden_dim, device=self.device)
+        self.act = torch.nn.GELU()
+        self.fc2 = torch.nn.Linear(hidden_dim, out_dim, device=self.device)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, n_latents, d_latents) -> operate on the n_latents axis, so
+        # transpose it to last (nn.Linear only ever contracts the last axis)
+        x = x.transpose(1, 2)  # (B, d_latents, n_latents)
+        x = self.fc2(self.act(self.fc1(x)))  # (B, d_latents, n_attractors)
+        return x.transpose(1, 2)  # (B, n_attractors, d_latents)
+
+
 class Dummy(torch.nn.Module):
 
     def __init__(self, device: torch.device):
@@ -617,6 +681,12 @@ class AttractorPerceiver(torch.nn.Module):
         elif self.lat2att == 'linear':
             self.latents2attractors = torch.nn.Linear(
                 args.n_latents, args.n_attractors, device=self.device)
+        elif self.lat2att == 'mlp':
+            hidden_dim = getattr(args, 'l2a_mlp_hidden_dim', None) \
+                or args.n_latents
+            self.latents2attractors = MLPCombination(
+                args.n_latents, args.n_attractors, hidden_dim,
+                device=self.device)
         else:
             assert args.n_latents == args.n_attractors, \
                 f"The number of latents: {args.n_latents} and attractors: \
@@ -857,6 +927,10 @@ class AttractorPerceiver(torch.nn.Module):
                 # convention as LinearCombination.forward above.
                 attractors_i = self.latents2attractors(
                     per_prcvblock_latents[i].transpose(1, 2)).transpose(1, 2)
+                l2a_entropy_term_i = torch.zeros(1)[0]
+            elif self.lat2att == 'mlp':
+                attractors_i = self.latents2attractors(
+                    per_prcvblock_latents[i])
                 l2a_entropy_term_i = torch.zeros(1)[0]
             else:
                 attractors_i = self.latents2attractors(
