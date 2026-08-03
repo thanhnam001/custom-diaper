@@ -1,0 +1,110 @@
+# Stage 2 (variant): same as train_10spks_mlp.yaml (latents2attractors: mlp,
+# intermediate_loss_perceiver: False) but adds
+# attractor_diversity_unmasked_loss_weight, a second, UNMASKED diversity
+# term (train.py/backend/losses.py::attractor_diversity_loss, newly wired
+# up in train.py's loss sum) on top of the existing masked one.
+#
+# Why: attractor_collapse_analysis.py on train_10spks_mlp.yaml's finished
+# run (mlp + attractor_diversity_loss_weight: 0.1) did NOT fix collapse --
+# slots {0,4,5,6,9} came out mutually collapsed (pairwise cos 0.60-0.92),
+# with slots 4 and 6 essentially dead even at high reference speaker count
+# (existence prob 0.001 and 0.089 at nspk>=7). Their Hungarian-match row
+# totals were 9 and 19 (vs 75-77 for the healthy slots) -- i.e. those slots
+# are rarely matched to a real speaker at all. masked_attractor_diversity_
+# loss (attractor-diversity-loss-weight) only penalizes similarity between
+# slots that are BOTH exists_mask=1 in the same chunk, so a chronically-
+# unmatched slot gets close to zero diversity gradient no matter how high
+# that weight is set -- raising it further was unlikely to help slots 4/6
+# specifically, since they're rarely in a penalized pair to begin with.
+#
+# attractor_diversity_unmasked_loss_weight applies the plain (unmasked)
+# attractor_diversity_loss to the SAME final-layer per-sequence attractors
+# (per_frameenclayer_attractors[:, :, :, -1]), but over all n_attractors
+# slots every batch, regardless of exists_mask -- so slots 4/6-like cases
+# get a constant push-apart signal even while they're rarely/never matched.
+# Kept as a separate weight from attractor-diversity-loss-weight (not
+# folded into it) because it fires unconditionally on every chunk rather
+# than a masked subset, so the two are not on a comparable numeric scale --
+# reusing one weight for both would make it impossible to tell which term
+# is doing the work. Started at 0.05 (not 0.1, matching
+# attractor-diversity-loss-weight) specifically because of that higher
+# effective duty cycle: this term touches every one of the 45 slot-pairs
+# every batch instead of whatever small masked subset the PIT matching
+# happens to produce, so the same weight would apply meaningfully more
+# total gradient across a training run.
+#
+# masked attractor-diversity-loss-weight is left at 0.1 (unchanged from
+# train_10spks_mlp.yaml) rather than raised further -- the new evidence
+# points at the masking gap as the likely cause of the persistent
+# collapse, not an insufficient weight on the existing masked term, so
+# that's the one variable being changed this iteration.
+#
+# init_model_path/init_epochs point back at stage 1 (pretrain500h), NOT at
+# train_10spks_mlp.yaml's finished (still-collapsed) adapt checkpoint --
+# this is a fresh stage-2 attempt with the new loss term from the start,
+# not a continuation on top of a checkpoint that already collapsed under
+# the old loss composition.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+attractor_diversity_unmasked_loss_weight: 0.05
+allow_partial_warmstart: True
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 16
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: False
+latents2attractors: mlp
+log_report_batches_num: 20
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 2400
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_mlp_unmaskeddiv
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 16
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/validation
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_pretrain500h/models

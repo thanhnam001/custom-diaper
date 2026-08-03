@@ -171,6 +171,20 @@ def compute_loss_and_metrics(
         attractor_diversity_loss_value = masked_attractor_diversity_loss(
             per_frameenclayer_attractors[:, :, :, -1], exists_mask)
 
+    if args.attractor_diversity_unmasked_loss_weight == 0:
+        attractor_diversity_unmasked_loss_value = torch.zeros(
+            (), device=inputs.device)
+    else:
+        # Same final-layer per-sequence attractors as the masked term above,
+        # but unmasked: slots that are rarely (or never) Hungarian-matched
+        # this batch still get pushed away from the others, instead of
+        # getting near-zero diversity gradient because they're rarely
+        # exists_mask=1 alongside another slot. Also not repeated for the
+        # intermediate frame-encoder/perceiver layers, matching the masked
+        # term's scope.
+        attractor_diversity_unmasked_loss_value = attractor_diversity_loss(
+            per_frameenclayer_attractors[:, :, :, -1])
+
     if args.intermediate_loss_frameencoder:
         intermediate_activation_losses_BCE = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
         intermediate_activation_losses_DER = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
@@ -270,7 +284,9 @@ def compute_loss_and_metrics(
         vad_loss * args.vad_loss_weight + \
         osd_loss * args.osd_loss_weight + \
         spkid_loss * args.speakerid_loss_weight + \
-        attractor_diversity_loss_value * args.attractor_diversity_loss_weight
+        attractor_diversity_loss_value * args.attractor_diversity_loss_weight + \
+        attractor_diversity_unmasked_loss_value * \
+        args.attractor_diversity_unmasked_loss_weight
 
     if not torch.isfinite(loss):
         # keep the accumulators clean; the caller skips the update for
@@ -311,6 +327,8 @@ def compute_loss_and_metrics(
     acum_metrics['spkid_loss'] += spkid_loss.item()
     acum_metrics['attractor_diversity_loss'] += \
         attractor_diversity_loss_value.item()
+    acum_metrics['attractor_diversity_unmasked_loss'] += \
+        attractor_diversity_unmasked_loss_value.item()
     return loss, acum_metrics
 
 
@@ -495,6 +513,28 @@ def parse_arguments() -> SimpleNamespace:
                         'mask-restricted attractor orthogonality (diversity) '
                         'penalty on the final layer per-sequence attractors; '
                         'see backend/losses.py')
+    parser.add_argument('--attractor-diversity-unmasked-loss-weight',
+                        default=0.0, type=float,
+                        help='weighting parameter for the UNMASKED '
+                        'attractor_diversity_loss on the same final layer '
+                        'per-sequence attractors (per_frameenclayer_'
+                        'attractors[:, :, :, -1]) that masked_attractor_'
+                        'diversity_loss uses, but applied to all n_attractors '
+                        'slots every batch instead of just the Hungarian-'
+                        'matched (exists_mask=1) ones. attractor-diversity-'
+                        'loss-weight alone gives chronically-unmatched slots '
+                        '(rarely selected by PIT matching) near-zero '
+                        'diversity gradient, since they are rarely both '
+                        'exists_mask=1 with another slot in the same chunk; '
+                        'this term pushes every slot apart regardless of '
+                        'whether it was matched this batch. Independent '
+                        'weight from attractor-diversity-loss-weight since '
+                        'this one fires on every chunk (not a masked subset) '
+                        'so the same numeric weight is not comparable '
+                        'between the two -- start low (e.g. 0.01-0.05) and '
+                        'watch attractor_diversity_unmasked_loss on '
+                        'TensorBoard relative to activation_loss_BCE/'
+                        'attractor_existence_loss. See backend/losses.py.')
     parser.add_argument('--condition-frame-encoder', type=bool, default=True)
     parser.add_argument('--conformer-conv-kernel-size', default=3, type=int,
                         help='depthwise-conv kernel size for the conformer '
