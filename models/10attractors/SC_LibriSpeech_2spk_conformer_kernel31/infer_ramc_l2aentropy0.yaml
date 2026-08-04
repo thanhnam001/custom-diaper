@@ -1,0 +1,73 @@
+# Inference config for the l2a-entropy-0 RAMC-finetuned checkpoint
+# (finetune_ramc_10spks_l2aentropy0.yaml's output_path/
+# models_finetuneRAMC/models).
+#
+# Single-variable variant of infer_ramc.yaml in this directory:
+# models_path/rttms_dir point at the l2aentropy0 experiment instead of the
+# plain baseline's. latents2attractors: weighted_average is unchanged --
+# l2a_entropy_loss_weight only affects the training-time loss (no-op for
+# inference, and infer.py doesn't even take that arg), so this checkpoint's
+# forward pass is architecturally identical to the baseline's, just
+# differently trained.
+#
+# epochs: 177-187 (-> averages checkpoints 178-187, the parser's "N-1 to M"
+# convention) covers the plateau this run converged to and early-stopped
+# at: dev DER 13.7-14.2% from eval ~97 through the end at epoch 187, dev
+# attractor_accuracy a steady ~92.0-92.3% over the same window (RAMC's
+# train/dev both cap at 3 distinct speakers/chunk -- see the
+# finetune_ramc_10spks_mlp_unmaskeddiv.yaml note -- so this branch isn't
+# fighting the same train/dev speaker-count mismatch MSDWild's is, hence
+# the much higher accuracy here). Override on the command line if a
+# different range looks better, e.g.:
+#
+#   python diaper/infer.py \
+#       -c models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31/infer_ramc_l2aentropy0.yaml \
+#       --epochs 160-187 \
+#       --infer-data-dir /path/to/other/test/set \
+#       --models-path /path/to/other/models \
+#       --rttms-dir /path/to/output
+
+# inference options
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+epochs: 177-187
+estimate_spk_qty: -1
+estimate_spk_qty_thr: 0.5
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+gpu: 1
+infer_data_dir: /data/ocr/namvt17/dataset/diarization/ramc/kaldi/test
+input_transform: logmel_meannorm
+latents2attractors: weighted_average
+median_window_length: 1
+model_type: AttractorPerceiver
+models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_l2aentropy0/models_finetuneRAMC/models
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+num_frames: -1
+num_speakers: 10
+pre_xa_heads: 4
+rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_l2aentropy0/models_finetuneRAMC/ramc_test_pred
+sampling_rate: 16000
+seed: 3
+subsampling: 5
+time_shuffle: False
+threshold: 0.5
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
