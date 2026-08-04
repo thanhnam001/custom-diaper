@@ -463,6 +463,8 @@ if __name__ == '__main__':
     infer_pbar = tqdm(infer_loader, total=len(infer_loader))
     for batch in infer_pbar:
         name = batch['names'][0]
+        if os.path.exists(join(out_dir, f"{name}.rttm")):
+            continue
         try:
             input = torch.stack(batch['xs']).to(args.device)
             with torch.no_grad():
