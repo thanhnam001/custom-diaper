@@ -1,0 +1,110 @@
+# Stage 3 (data-mix variant): finetune the mlp_unmaskeddiv stage-2 checkpoint
+# on MSDWild train + high-speaker-count replay chunks from the adapt-phase
+# 300h corpus, instead of MSDWild train alone.
+#
+# Single-variable variant of finetune_msdwild_10spks_mlp_unmaskeddiv.yaml in
+# this directory: ONLY train_precomputed_dir and output_path differ. Every
+# loss/architecture/optimizer setting is identical, so any DER/attractor_acc
+# delta between this run and the plain mlp_unmaskeddiv MSDWild finetune is
+# attributable to the data mix, not to a confounded hyperparameter change.
+#
+# train_precomputed_dir here is the output of the 3-step mixing pipeline:
+#   1. python diaper/common_utils/precompute_features.py \
+#          /kaggle/input/datasets/namvothanh/librispeech-synth-300h-max-10spks/v1_300hours_max10spks/--no-use-rirs--use-noises/train/data \
+#          <new_output_dir>/train \
+#          --chunk-size 6000 --frame-size 400 --frame-shift 160 \
+#          --sampling-rate 16000 --feature-dim 40 \
+#          --input-transform logmel_meannorm --use-last-samples \
+#          --tail-subsampling 10 --num-workers 8
+#      (n_speakers must end up None in <new_output_dir>/train/meta.pkl to
+#      match MSDWild's own meta.pkl for step 3's equality check -- either
+#      omit --n-speakers, or patch meta.pkl after the fact if you already
+#      ran it with --n-speakers 10)
+#   2. python diaper/common_utils/filter_precomputed_by_speaker_count.py \
+#          <new_output_dir>/train <filtered_output_dir>/train \
+#          --min-speakers 5
+#   3. python diaper/common_utils/merge_precomputed_features.py \
+#          <filtered_output_dir>/train \
+#          /data/ocr/namvt17/dataset/diarization/msdwild_precompute_6000frames/train \
+#          <merged_output_dir>/train --mode hardlink
+#
+# valid_precomputed_dir is left as MSDWild's own real dev set (unchanged from
+# the non-mixed config) -- the replay data should only pad out training
+# signal, not the evaluation target, otherwise dev DER/attractor_accuracy
+# would stop measuring MSDWild performance specifically.
+#
+# init_epochs: 90-100 is a placeholder, same as the non-mixed sibling config
+# -- swap in whichever stage-2 epoch(s) actually look best once
+# train_10spks_mlp_unmaskeddiv.yaml finishes.
+#
+# Evaluate the same way as the other kernel31 MSDWild runs:
+#   python diaper/eval_checkpoint.py -c <this file> --init-epochs <range>
+#   python diaper/analyze_attractor_branch.py -c <this file> --init-epochs <range>
+#   python diaper/attractor_collapse_analysis.py -c <this file> --init-epochs <range>
+# and compare dev attractor_accuracy / DER trajectory in TensorBoard against
+# finetune_msdwild_10spks_mlp_unmaskeddiv.yaml's run to see whether the mix
+# actually raises the ~72% attractor-accuracy ceiling that run plateaus at.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+attractor_diversity_unmasked_loss_weight: 0.05
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+early_stopping: true
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_mlp_unmaskeddiv/models
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: False
+latents2attractors: mlp
+log_report_batches_num: 10
+lr: 1e-6
+max_epochs: 750
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+norm_loss_per_spk: True
+num_frames: 600
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: adam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_mlp_unmaskeddiv/models_finetuneMSDWILD_mix_min_8spks
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 32
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/msdwild_mix_min_8spks_precompute_6000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/msdwild_precompute_6000frames/dev
