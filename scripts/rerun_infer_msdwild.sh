@@ -53,6 +53,7 @@ MSDWILD_COLLAR="0.25"
 # no local checkpoints exist for those yet (their MSDWild finetune either
 # hasn't been run, or its output hasn't been synced from the server).
 CONFIGS=(
+    "models/10attractors/SC_LibriSpeech_2spk_adapted1-10/infer_msdwild.yaml"
     "models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31/infer_msdwild.yaml"
     "models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31/infer_msdwild_l2aentropy0.yaml"
     "models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31/infer_msdwild_mlp_unmaskeddiv.yaml"
