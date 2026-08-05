@@ -30,6 +30,15 @@ set -e
 # the "*** OVERALL ***" line is echoed to the terminal -- check the log file
 # for the per-recording breakdown.
 
+# Respects an already-set CUDA_VISIBLE_DEVICES from the calling shell (e.g.
+# `CUDA_VISIBLE_DEVICES=1 ./scripts/rerun_infer_msdwild.sh`), falling back to
+# GPU 0 only if the caller didn't set one -- same convention as
+# run_pipeline_conformer_kernel3_6blocks.sh. Each infer_msdwild*.yaml's
+# `gpu: 1` only means "use CUDA" (infer.py:411 checks `>= 1`, not a device
+# index), so this env var is what actually picks the physical GPU; `conda
+# run` inherits it since it's exported here before that subprocess starts.
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
 SERVER_PREFIX="/data/ocr/namvt17/custom-diaper/"
 SERVER_INFER_DATA_DIR="database/msdwild/kaldi/test"
 REF_RTTM="database/msdwild/rttms/few.val.rttm"
