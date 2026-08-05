@@ -13,19 +13,28 @@
 # (training-only), so nothing about the loss composition needs to be
 # carried over here either way.
 #
-# epochs is intentionally left out: finetune_msdwild_10spks_mlp_
-# unmaskeddiv_mixed.yaml hasn't been run yet, so there's no dev DER curve to
-# pick a range from. Once it finishes, compare its dev attractor_accuracy/
-# DER trajectory in TensorBoard against the non-mixed
-# finetune_msdwild_10spks_mlp_unmaskeddiv.yaml run (which plateaus around
-# dev DER 52.4-52.6%, attractor_accuracy ~72%) to see whether the replay
-# data actually helped, pick a range from whichever plateau this run
-# settles into, then pass epochs (and override infer_data_dir/models_path/
-# rttms_dir if needed) on the command line:
+# median_window_length: 11 / subsampling: 10 follow the paper's
+# collar-dependent post-processing rule for MSDWild's 0.25s collar (see
+# infer_msdwild.yaml's header comment in this directory) -- do not copy
+# infer_ramc*.yaml's values (median_window_length: 1 / subsampling: 5) here.
+#
+# epochs: 77-87 (-> averages checkpoints 78-87, the parser's "N-1 to M"
+# convention) is the last 10 of the 30 checkpoints currently kept locally
+# under experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_mlp_unmaskeddiv/
+# models_finetuneMSDWILD_mix_min_8spks/models (run early-stopped at epoch
+# 87; dev DER plateaus in a noisy 54.67-55.33% band from epoch ~57 through
+# 87 with no clear single best epoch, so this mirrors the "last 10 epochs"
+# convention used by the sibling l2aentropy0/mlp_unmaskeddiv configs in this
+# directory rather than picking one epoch out of a flat plateau). That dev
+# DER plateau is *worse* than the non-mixed finetune_msdwild_10spks_mlp_
+# unmaskeddiv.yaml run's ~52.14-52.6% (dev attractor_accuracy ~69-71.5% here
+# vs. ~72-73% there too) -- the min-8-speaker replay data does not appear to
+# have helped this run; see TensorBoard for both before drawing conclusions.
+# Override on the command line if needed, e.g.:
 #
 #   python diaper/infer.py \
 #       -c models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31/infer_msdwild_mlp_unmaskeddiv_mixed.yaml \
-#       --epochs <range> \
+#       --epochs <new-range> \
 #       --infer-data-dir /path/to/other/test/set \
 #       --models-path /path/to/other/models \
 #       --rttms-dir /path/to/output
@@ -38,6 +47,7 @@ context_size: 7
 d_latents: 128
 dropout_attractors: 0.1
 dropout_frames: 0.1
+epochs: 77-87
 estimate_spk_qty: -1
 estimate_spk_qty_thr: 0.5
 feature_dim: 40
@@ -51,7 +61,7 @@ gpu: 1
 infer_data_dir: /data/ocr/namvt17/dataset/diarization/msdwild/kaldi/test
 input_transform: logmel_meannorm
 latents2attractors: mlp
-median_window_length: 1
+median_window_length: 11
 model_type: AttractorPerceiver
 models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_mlp_unmaskeddiv/models_finetuneMSDWILD_mix_min_8spks/models
 n_attractors: 10
@@ -67,7 +77,7 @@ pre_xa_heads: 4
 rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_mlp_unmaskeddiv/models_finetuneMSDWILD_mix_min_8spks/msdwild_test_pred
 sampling_rate: 16000
 seed: 3
-subsampling: 5
+subsampling: 10
 time_shuffle: False
 threshold: 0.5
 use_frame_selfattention: True

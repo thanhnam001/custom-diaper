@@ -6,12 +6,20 @@
 # a training-only loss term (and disabled in this recipe anyway) and has no
 # effect on inference, so it is not repeated here.
 #
-# epochs is intentionally left out: pass it on the command line once you
-# know which checkpoint(s) to average (e.g. from the best dev-loss epoch in
-# TensorBoard, since this stage trains with early_stopping over up to 750
-# epochs rather than a fixed epoch count). infer_data_dir/models_path/
-# rttms_dir below have working defaults but can also be overridden the same
-# way. Example:
+# median_window_length: 11 / subsampling: 10 follow the paper's
+# collar-dependent post-processing rule for MSDWild's 0.25s collar (see
+# infer_msdwild.yaml's header comment in SC_LibriSpeech_2spk_conformer_kernel31/
+# for the full rationale) -- do not copy infer_ramc.yaml's values
+# (median_window_length: 1 / subsampling: 5) here.
+#
+# epochs is intentionally left out: no checkpoints for this experiment
+# exist locally yet under experiments/10attractors/SC_LibriSpeech_2spk_linear_nodiversity_adapted1-10_300h_maximum10spks/
+# models_finetuneMSDWILD/models (finetune_msdwild_10spks.yaml in this
+# directory hasn't been run, or its output hasn't been synced from the
+# server). Once checkpoints exist, pick a range from experiments/ (not a
+# guess) -- e.g. the last 10 kept after pruning, or from the best dev-DER
+# plateau in TensorBoard. infer_data_dir/models_path/rttms_dir below have
+# working defaults but can also be overridden the same way. Example:
 #
 #   python diaper/infer.py \
 #       -c models/10attractors/SC_LibriSpeech_2spk_linear_nodiversity/infer_msdwild.yaml \
@@ -38,7 +46,7 @@ gpu: 1
 infer_data_dir: /data/ocr/namvt17/dataset/diarization/msdwild/kaldi/test
 input_transform: logmel_meannorm
 latents2attractors: linear
-median_window_length: 1
+median_window_length: 11
 model_type: AttractorPerceiver
 models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_linear_nodiversity_adapted1-10_300h_maximum10spks/models_finetuneMSDWILD/models
 n_attractors: 10
@@ -54,7 +62,7 @@ pre_xa_heads: 4
 rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_linear_nodiversity_adapted1-10_300h_maximum10spks/models_finetuneMSDWILD/msdwild_test_pred
 sampling_rate: 16000
 seed: 3
-subsampling: 5
+subsampling: 10
 time_shuffle: False
 threshold: 0.5
 use_frame_selfattention: True

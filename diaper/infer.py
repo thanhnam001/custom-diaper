@@ -483,15 +483,20 @@ if __name__ == '__main__':
                 f"{name}: CUDA out of memory, retrying this recording on "
                 "CPU")
             torch.cuda.empty_cache()
-            input = torch.stack(batch['xs']).to("cpu")
-            with torch.no_grad():
-                (
-                    y_pred,
-                    existence_probs,
-                    per_prcvblock_latents,
-                    per_prcvblock_attractors,
-                    y_probs
-                ) = estimate_diarization_outputs(cpu_model, input, args)
+            try:
+                input = torch.stack(batch['xs']).to("cpu")
+                with torch.no_grad():
+                    (
+                        y_pred,
+                        existence_probs,
+                        per_prcvblock_latents,
+                        per_prcvblock_attractors,
+                        y_probs
+                    ) = estimate_diarization_outputs(cpu_model, input, args)
+            except RuntimeError as cpu_e:
+                logging.error(
+                    f"{name}: CPU fallback also failed: {cpu_e}")
+                continue
 
         try:
             # Each one has a single sequence

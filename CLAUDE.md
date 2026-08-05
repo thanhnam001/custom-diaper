@@ -18,6 +18,49 @@ Conda env, Python 3.7-era pins (see README.md `## Getting started` for the exact
 `safe_gpu`, `yamlargparse==1.31.1`, etc.). There is no `requirements.txt` or
 `pyproject.toml`; the README install block is the source of truth for dependencies.
 
+On this machine, the env already exists as a path-based conda env at
+`../Master/repos/DiaPer/.diaper_env` (relative to this repo root, i.e.
+`D:\Python\Master\repos\DiaPer\.diaper_env`) — use it for every `python
+diaper/...` command in this repo rather than reinstalling. Activate with
+`conda activate D:/Python/Master/repos/DiaPer/.diaper_env` (path-based envs
+aren't in the named list `conda env list` shows first).
+
+## Evaluation (scoring RTTMs)
+
+DER is **not** computed by anything in this repo directly for final reporting —
+`diaper/infer.py`/`infer_single_file.py` only produce RTTMs (see "Outputs"
+below). Scoring those RTTMs against ground truth is done with
+[dscore](https://github.com/nryant/dscore), checked out locally at
+`../Master/repos/dscore` (relative to this repo root), using its own conda env
+named `dscore`:
+
+```bash
+conda activate dscore
+cd ../Master/repos/dscore
+python score.py -r <gt_rttm...> -s <pred_rttm...>
+# or, for many files: python score.py -R ref.scp -S sys.scp
+```
+
+See that repo's README.md for the full flag set (`-u`/UEM scoring regions,
+`--collar`, `--ignore_overlaps`, `--n_digits`, `--table_format`, etc.);
+`score.py`'s own docstring has more detail.
+
+**Collar convention matters and differs by dataset** (confirmed against Table
+II of the DiaPer paper, `DiaPer End-to-End Neural Diarization with
+Perceiver-Based Attractors.pdf` at this repo's root — see "Background reading"
+below):
+- **MSDWiLD**: collar **0.25 s** (`--collar 0.25`).
+- **RAMC**: collar **0 s** (dscore's default, no `--collar` flag needed).
+
+The paper's inference-time post-processing is tied to that same collar choice
+(Section IV.D) and matters for reproducing its numbers: when the forgiveness
+collar is 0 s (RAMC), no median filter is applied and inference is run with
+**5-frame subsampling** in the frame encoder instead of the usual 10, for
+finer output resolution; when a collar is used (MSDWiLD, 0.25 s), a
+**median filter with window 11** is applied over the speech activity output
+instead. Match `infer.py`'s `--median-window-length`/subsampling flags to
+whichever dataset you're scoring, not just the DER-scoring `--collar` flag.
+
 ## Commands
 
 All commands are run from the repo root.
@@ -64,6 +107,49 @@ in `parse_arguments()` in the corresponding script can also be overridden on the
 command line after `-c config.yaml`. Paths inside example configs like
 `<output directory>` / `<train Kaldi data directory>` are placeholders you must
 fill in — they are not resolved automatically.
+
+## Local data layout
+
+On this machine, real-data corpora and their precomputed feature caches are
+under `database/` (repo-local, gitignored):
+- `database/msdwild/kaldi/{train,dev,test}` — Kaldi-style data dirs;
+  `database/msdwild/rttms/{all,few.train,few.val,many.val}.rttm` — reference
+  RTTMs (dscore `-r`/`-R` input). Collar for scoring: 0.25 s (see
+  "Evaluation" above).
+- `database/ramc/kaldi/{train,dev,test}` — Kaldi-style data dirs (plus the raw
+  `DataPartition`/`KeywordList`/`MDT2021S003` corpus dirs RAMC ships with).
+  Collar for scoring: 0 s.
+- `database/msdwild_precompute_6000frames/{train,dev}` and
+  `database/ramc_precomputed_6000frames/{train,dev}` — outputs of
+  `precompute_features.py` (chunk-size 6000 raw frames), ready to point
+  `--train-precomputed-dir`/`--valid-precomputed-dir` at directly.
+- `database/` also has `LibriSpeech`, `callhome_*`, `voxconverse`,
+  `simulated_rirs_16k`, `musan`-derived noise (`data/musan_bgnoise`), etc. for
+  building simulated conversations (SC) or other corpora referenced in
+  `models/*/*.yaml` configs.
+
+Synthetic/simulated-conversation (SC) data — the large precomputed sets used
+to pretrain/adapt models before real-data fine-tuning — lives outside the
+repo at `E:/datasets`. Directory names there mirror the ones used on the
+original training server (e.g. `v1_300hours_max10spks`,
+`v1_500hours_fixed_2spks_precompute`,
+`diaper_precompute_300h_maximum_10spks_24000frames`), but aren't guaranteed
+to be a 1:1 match for every path referenced in old configs/comments (which
+often point at server-only paths like `/data/ocr/namvt17/...` or
+`/kaggle/input/...`). **If a config or comment references a synthetic dataset
+that doesn't have an obvious match under `E:/datasets`, ask before assuming
+which local directory (if any) corresponds to it** — don't guess a
+substitute or fabricate a path.
+
+## Background reading
+
+`DiaPer End-to-End Neural Diarization with Perceiver-Based Attractors.pdf`
+(repo root) is the original paper this codebase implements
+(arXiv:2312.04324) — read it for the method rationale, training-recipe
+details (SC generation, curriculum of 2-speaker → multi-speaker → in-domain
+fine-tuning, LR/warmup choices in Table III), and the full evaluation-data
+table (Table II — per-dataset collar, speaker-count range, hours) referenced
+in "Evaluation" above.
 
 ## Architecture
 

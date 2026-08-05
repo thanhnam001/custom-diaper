@@ -104,3 +104,5 @@ transformers-main/
 dscore/
 ignores/
 experiments/
+*.npz
+/analysis_output/

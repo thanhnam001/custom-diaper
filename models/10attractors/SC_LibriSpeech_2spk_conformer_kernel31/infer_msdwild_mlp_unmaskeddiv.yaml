@@ -2,6 +2,11 @@
 # (finetune_msdwild_10spks_mlp_unmaskeddiv.yaml's output_path/
 # models_finetuneMSDWILD/models).
 #
+# median_window_length: 11 / subsampling: 10 follow the paper's
+# collar-dependent post-processing rule for MSDWild's 0.25s collar (see
+# infer_msdwild.yaml's header comment in this directory) -- do not copy
+# infer_ramc*.yaml's values (median_window_length: 1 / subsampling: 5) here.
+#
 # Single-variable variant of infer_msdwild.yaml in this directory:
 # latents2attractors: mlp (was weighted_average) and models_path/rttms_dir
 # point at the mlp_unmaskeddiv experiment instead. Everything else
@@ -46,7 +51,7 @@ gpu: 1
 infer_data_dir: /data/ocr/namvt17/dataset/diarization/msdwild/kaldi/test
 input_transform: logmel_meannorm
 latents2attractors: mlp
-median_window_length: 1
+median_window_length: 11
 model_type: AttractorPerceiver
 models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_mlp_unmaskeddiv/models_finetuneMSDWILD/models
 n_attractors: 10
@@ -62,7 +67,7 @@ pre_xa_heads: 4
 rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_maximum10spks_mlp_unmaskeddiv/models_finetuneMSDWILD/msdwild_test_pred
 sampling_rate: 16000
 seed: 3
-subsampling: 5
+subsampling: 10
 time_shuffle: False
 threshold: 0.5
 use_frame_selfattention: True
