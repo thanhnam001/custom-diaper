@@ -40,8 +40,8 @@ set -e
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 SERVER_PREFIX="/data/ocr/namvt17/custom-diaper/"
-SERVER_INFER_DATA_DIR="database/msdwild/kaldi/test"
-REF_RTTM="database/msdwild/rttms/few.val.rttm"
+SERVER_INFER_DATA_DIR="/data/ocr/namvt17/dataset/diarization/msdwild/kaldi/test"
+REF_RTTM="/data/ocr/namvt17/dataset/diarization/msdwild/rttms/few.val.rttm"
 DIAPER_ENV="/data/ocr/namvt17/custom-diaper/.venv"
 DSCORE_SRC="/data/ocr/namvt17/custom-diaper/dscore"
 DSCORE_ENV="/data/ocr/namvt17/custom-diaper/dscore/.dscore"
