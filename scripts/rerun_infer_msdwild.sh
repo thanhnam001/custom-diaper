@@ -99,7 +99,7 @@ for cfg in "${CONFIGS[@]}"; do
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] finished inference: $cfg"
 
-    mapfile -t sys_rttms < <(find "$local_rttms_dir" -name '*.rttm' -type f)
+    mapfile -t sys_rttms < <(find "$local_rttms_dir" -path '*/median11/*.rttm' -type f)
     if [ "${#sys_rttms[@]}" -eq 0 ]; then
         echo "  WARNING: no .rttm files found under $local_rttms_dir, skipping scoring"
         continue
@@ -108,7 +108,7 @@ for cfg in "${CONFIGS[@]}"; do
     score_log="${local_rttms_dir}/dscore_collar${MSDWILD_COLLAR}.log"
     echo "  scoring ${#sys_rttms[@]} RTTM(s) against $REF_RTTM (collar ${MSDWILD_COLLAR}s)"
 
-    conda run -p "$DSCORE_ENV" --no-capture-output python "$DSCORE_SRC/score.py" \
+    conda run -p "$DSCORE_ENV" --no-capture-output python -u "$DSCORE_SRC/score.py" \
         --collar "$MSDWILD_COLLAR" \
         -r "$REF_RTTM" \
         -s "${sys_rttms[@]}" \
