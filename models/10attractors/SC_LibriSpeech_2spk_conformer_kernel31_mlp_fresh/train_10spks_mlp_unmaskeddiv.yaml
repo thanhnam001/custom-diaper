@@ -1,0 +1,103 @@
+# Stage 2/3 (pipeline 1 of 2 -- WITH unmasked diversity loss): adapt the
+# fresh mlp stage-1 pretrain (train.yaml in this directory) to 1-10
+# speakers, adding attractor_diversity_unmasked_loss_weight on top of the
+# masked diversity loss that was already active in stage 1.
+#
+# This is the fresh-pipeline counterpart of
+# SC_LibriSpeech_2spk_conformer_kernel31/train_10spks_mlp_unmaskeddiv.yaml,
+# with one structural difference: that config warm-starts from a
+# weighted_average-trained stage 1 (allow_partial_warmstart: True, skipping
+# the incompatible latents2attractors.* keys), so the mlp architecture only
+# existed from stage 2 onward. Here, init_model_path points at THIS
+# directory's own train.yaml output, which was already trained with
+# latents2attractors: mlp -- so allow_partial_warmstart is neither needed
+# nor set; a strict load_state_dict is correct, and if it ever errors here
+# that's a real mismatch worth investigating, not an expected
+# weighted_average -> mlp key gap.
+#
+# attractor_diversity_unmasked_loss_weight: 0.05 is the only intentional
+# difference from this directory's sibling train_10spks_mlp.yaml (pipeline
+# 2, no unmasked diversity loss) -- both fork off the identical stage-1
+# checkpoint, so any difference in downstream collapse/DER between the two
+# is attributable to this one loss term rather than to differences in
+# pretraining. See
+# SC_LibriSpeech_2spk_conformer_kernel31/train_10spks_mlp_unmaskeddiv.yaml's
+# header for the full rationale for this loss term (chronically-unmatched
+# attractor slots get near-zero gradient from the masked term alone).
+#
+# intermediate_loss_perceiver: False (stage 1 in this directory has it
+# True, matching the original pretrain recipe) -- same rationale as the
+# patched lineage: n_blocks_attractors PerceiverEncoders are chained
+# sequentially with a single shared existence head across blocks, so deep
+# supervision there mostly just adds shared-weight gradient conflict.
+# intermediate_loss_frameencoder is left on (condition_frame_encoder makes
+# those genuinely separate estimation/detection cycles, not one shared
+# bottleneck).
+#
+# init_epochs: 90-100 matches this repo's standard convention (and the
+# paper's) for the epoch range to average after a stage-1 pretrain --
+# consistently the well-trained range in this repo's kernel31 runs so far,
+# not a per-run placeholder to tune.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+attractor_diversity_unmasked_loss_weight: 0.05
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 16
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: False
+latents2attractors: mlp
+log_report_batches_num: 20
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 2400
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_adapted1-10_300h_maximum10spks_mlp_unmaskeddiv
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 16
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/validation
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_pretrain500h/models

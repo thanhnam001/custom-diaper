@@ -1,0 +1,104 @@
+# Stage 1/3 (SHARED): pretrain on 2-speaker LibriSpeech-simulated
+# conversations (500h) with latents2attractors: mlp from the start.
+#
+# Why this exists as a separate lineage from
+# SC_LibriSpeech_2spk_conformer_kernel31/: that directory's mlp/
+# mlp_unmaskeddiv stage-2 configs (train_10spks_mlp.yaml,
+# train_10spks_mlp_unmaskeddiv.yaml) warm-start from THIS directory's
+# sibling train.yaml, which was trained with latents2attractors:
+# weighted_average -- allow_partial_warmstart: True lets them skip loading
+# the incompatible latents2attractors.* tensors and leaves those randomly
+# initialized. So in that lineage, only stage 2 onward ever sees the mlp
+# architecture; the frame encoder / perceiver latents feeding into it were
+# optimized entirely under the weighted_average regime. That's a real
+# confound for evaluating "does mlp (+ unmasked diversity loss) help" --
+# this config removes it by using latents2attractors: mlp from the very
+# first stage-1 step, so no downstream stage ever needs
+# allow_partial_warmstart or inherits weighted_average-shaped
+# representations.
+#
+# attractor_diversity_loss_weight: 0.1 (masked) is also active here from
+# stage 1, unlike every other lineage in this repo (which only introduces
+# it starting at stage 2). Deliberate choice: since this pretrain already
+# isolates the mlp architecture as the point of this lineage, folding the
+# diversity pressure in from the start avoids letting slots settle into a
+# collapsed configuration during 100 epochs of stage-1 training that stage
+# 2 then has to fight against -- consistent with the mlp architecture
+# removing the weighted_average convex-combination ceiling that was the
+# whole reason masked_attractor_diversity_loss was introduced (see
+# SC_LibriSpeech_2spk_conformer_kernel31/train_10spks_mlp.yaml's header).
+# attractor_diversity_unmasked_loss_weight is deliberately NOT set here --
+# it's the one variable that forks stage 2 into the two downstream
+# pipelines (train_10spks_mlp.yaml / train_10spks_mlp_unmaskeddiv.yaml in
+# THIS directory), so it stays out of the shared stage-1 recipe.
+#
+# This checkpoint is the single shared starting point for both downstream
+# stage-2 pipelines in this directory -- only run this once, not once per
+# pipeline.
+#
+# Everything else is unchanged from
+# SC_LibriSpeech_2spk_conformer_kernel31/train.yaml (kernel size 31,
+# batchnorm, weighted_average's peer hyperparameters minus the arch/loss
+# changes above). noam_model_size / noam_warmup_steps are again omitted:
+# train.py auto-computes them from max_epochs * (precomputed train set
+# size / train_batchsize) with a 10% warmup fraction and the validated
+# default peak LR (see diaper/common_utils/noam_lr_calc.py).
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 80
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+latents2attractors: mlp
+log_report_batches_num: 20
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 600
+num_speakers: 2
+num_workers: 4
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_pretrain500h
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 80
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_500h_fixed_2spks
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_500h_fixed_2spks_validation

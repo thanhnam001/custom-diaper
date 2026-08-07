@@ -4,7 +4,7 @@
 # Licensed under the MIT license.
 
 from scipy.optimize import linear_sum_assignment
-from typing import Dict
+from typing import Dict, Tuple, Union
 import torch
 
 
@@ -12,17 +12,35 @@ def calculate_metrics(
     target: torch.Tensor,
     decisions: torch.Tensor,
     threshold: float = 0.5,
+    collar_frames: int = 0,
     round_digits: int = 2,
-) -> Dict[str, float]:
+    return_denominators: bool = False,
+) -> Union[Dict[str, float], Tuple[Dict[str, float], Dict[str, float]]]:
+    """`collar_frames` (default 0, i.e. no change from the original
+    no-collar behavior): number of frames on each side of a reference
+    speaker-turn boundary to exclude from scoring, mirroring dscore/
+    md-eval.pl's forgiveness collar. A "boundary" is any frame whose
+    reference speaker-activity row differs from the previous frame's (or
+    frame 0, treated as a boundary since it's the start of a scored
+    segment); frames within `collar_frames` of any boundary are dropped
+    from both the error numerators and the scored-frame denominators for
+    that sequence before anything else is computed. Converting a collar in
+    seconds to `collar_frames` (round(collar_seconds / frame_period)) is the
+    caller's job, since this function doesn't know the frame period."""
     epsilon = 1e-6
     res = {}
     decisions = (decisions > threshold).float()
     res["avg_ref_spk_qty"] = 0
     res["avg_pred_spk_qty"] = 0
-    res["DER_miss"] = 0
-    res["DER_FA"] = 0
-    res["DER_conf"] = 0
-    res["DER"] = 0
+    # Kept as tensors (not plain 0) from the start: with a large enough
+    # collar_frames every sequence in the batch can end up with zero frames
+    # left to score (all `continue`d), in which case these are never
+    # reassigned by a tensor `+=` below and torch.round() further down
+    # needs a Tensor, not a plain int, to not blow up.
+    res["DER_miss"] = torch.tensor(0.0)
+    res["DER_FA"] = torch.tensor(0.0)
+    res["DER_conf"] = torch.tensor(0.0)
+    res["DER"] = torch.tensor(0.0)
     res["VAD_FA"] = 0
     res["VAD_miss"] = 0
     res["OSD_FA"] = 0
@@ -41,6 +59,25 @@ def calculate_metrics(
             torch.tensor([(target[seq_num].shape[0])]))))
         t_seq = target[seq_num, :boundary, :]
         d_seq = decisions[seq_num, :boundary, :]
+
+        if collar_frames > 0 and t_seq.shape[0] > 0:
+            changed = (t_seq[1:] != t_seq[:-1]).any(dim=1)
+            is_boundary = torch.zeros(t_seq.shape[0])
+            is_boundary[0] = 1.0
+            is_boundary[1:] = changed.float()
+            # Dilate each boundary frame by +/-collar_frames via a max-pool
+            # (implicit -inf padding at the sequence edges keeps the collar
+            # from wrapping/extending past frame 0 or the last frame).
+            collared = torch.nn.functional.max_pool1d(
+                is_boundary.view(1, 1, -1),
+                kernel_size=2 * collar_frames + 1, stride=1,
+                padding=collar_frames).view(-1)
+            keep = collared < 0.5
+            t_seq = t_seq[keep]
+            d_seq = d_seq[keep]
+
+        if t_seq.shape[0] == 0:
+            continue
 
         cost_mx = -d_seq.unsqueeze(0).permute(0, 2, 1).bmm(
             t_seq.unsqueeze(0)) + d_seq.unsqueeze(0).permute(0, 2, 1).bmm(
@@ -100,6 +137,24 @@ def calculate_metrics(
     res["avg_ref_spk_qty"] = res["avg_ref_spk_qty"] / target.shape[0]
     res["avg_pred_spk_qty"] = res["avg_pred_spk_qty"] / target.shape[0]
 
+    if return_denominators:
+        # VAD_FA/VAD_miss and OSD_FA/OSD_miss are normalized by
+        # active_frames_tot/overlap_frames_tot respectively, which is a
+        # different population than the one their FA numerator counts
+        # come from -- so when that denominator is (near) zero the `epsilon`
+        # above doesn't make the rate "undefined-but-harmless", it makes it
+        # blow up to an arbitrarily large multiple of any nonzero FA count.
+        # Fine when pooled over a whole training batch (rarely exactly
+        # zero); not fine per-file (e.g. any single-speaker file has
+        # overlap_frames_tot == 0), where callers doing a per-file average
+        # need these raw counts to detect and exclude that case rather than
+        # silently average in numbers like 1e8%.
+        denominators = {
+            "speech_frames_tot": float(speech_frames_tot),
+            "active_frames_tot": float(active_frames_tot),
+            "overlap_frames_tot": float(overlap_frames_tot),
+        }
+        return res, denominators
     return res
 
 

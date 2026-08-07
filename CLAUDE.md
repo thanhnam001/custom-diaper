@@ -151,6 +151,13 @@ fine-tuning, LR/warmup choices in Table III), and the full evaluation-data
 table (Table II — per-dataset collar, speaker-count range, hours) referenced
 in "Evaluation" above.
 
+The fresh, unmodified upstream repo this one was forked/customized from is
+checked out locally at `../Master/repos/DiaPer` (relative to this repo root,
+i.e. `D:\Python\Master\repos\DiaPer`) — use it as a reference to diff against
+when investigating whether a discrepancy (metric calculation, loss, config
+default, etc.) comes from an intentional local customization or is a
+pre-existing part of the original code.
+
 ## Architecture
 
 ### Pipeline

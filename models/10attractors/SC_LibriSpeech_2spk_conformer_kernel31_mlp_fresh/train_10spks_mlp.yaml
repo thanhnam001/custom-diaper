@@ -1,0 +1,86 @@
+# Stage 2/3 (pipeline 2 of 2 -- WITHOUT unmasked diversity loss): adapt the
+# fresh mlp stage-1 pretrain (train.yaml in this directory) to 1-10
+# speakers, keeping only the masked attractor_diversity_loss that was
+# already active in stage 1 -- the ablation counterpart of this
+# directory's train_10spks_mlp_unmaskeddiv.yaml.
+#
+# Forks off the IDENTICAL stage-1 checkpoint as
+# train_10spks_mlp_unmaskeddiv.yaml (same init_model_path/init_epochs) so
+# the only variable between the two pipelines from this point on is
+# attractor_diversity_unmasked_loss_weight (0.0/unset here vs 0.05 there).
+# That shared stage 1 is the point of this directory's structure: it means
+# running this pipeline costs only stage 2 + stage 3, not a second 500h
+# pretrain, precisely to make the "is the unmasked term worth it" ablation
+# cheap enough to actually run.
+#
+# No allow_partial_warmstart here, same reasoning as the sibling config:
+# stage 1 in this directory already used latents2attractors: mlp, so a
+# strict load_state_dict is expected to succeed.
+#
+# init_epochs: 90-100 -- same standard range as
+# train_10spks_mlp_unmaskeddiv.yaml (see that config's header). Using the
+# SAME value in both stage-2 configs keeps any downstream difference
+# attributable to the stage-2 loss change, not to picking a different
+# stage-1 checkpoint per pipeline.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 16
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: False
+latents2attractors: mlp
+log_report_batches_num: 20
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 2400
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_adapted1-10_300h_maximum10spks_mlp
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 16
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_300h_maximum_10spks_24000frames/validation
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_pretrain500h/models

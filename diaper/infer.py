@@ -23,20 +23,24 @@ sys.path.insert(
 # details; it's a no-op on Python <3.10.
 import common_utils.collections_abc_compat  # noqa: E402,F401
 
+from backend.losses import pad_labels_zeros
 from backend.models import (
     average_checkpoints,
     get_model,
 )
 from common_utils.diarization_dataset import KaldiDiarizationDataset
+from common_utils.metrics import calculate_metrics
 from os.path import join
 from pathlib import Path
 from torch.utils.data import DataLoader
 from train import _convert
 from types import SimpleNamespace
-from typing import List, TextIO, Tuple
+from typing import Dict, List, TextIO, Tuple
+from scipy.optimize import linear_sum_assignment
 from scipy.signal import medfilt
 from tqdm import tqdm
 import copy
+import csv
 import logging
 import matplotlib.pyplot as plt
 import numpy as np
@@ -238,14 +242,15 @@ def estimate_diarization_outputs(
         per_prcvblock_attractors, torch.stack(ys))
 
 
-def postprocess_output(
+def get_hard_decisions(
     probabilities,
-    subsampling: int,
     threshold: float,
     median_window_length: int,
     normalize_probs: bool
 ) -> np.ndarray:
-    """Threshold probabilities and apply median filter."""
+    """Threshold probabilities and apply median filter, at the model's
+    native (subsampled) frame rate -- i.e. everything postprocess_output
+    does except the final upsampling back to raw frame rate."""
     if normalize_probs:
         probabilities = (probabilities - probabilities.min(axis=0)[0]) / \
                 probabilities.max(axis=0)[0]
@@ -256,8 +261,138 @@ def postprocess_output(
         filtered[:, spk] = medfilt(
             thresholded[:, spk].to(float),
             kernel_size=median_window_length).astype(bool)
+    return filtered
+
+
+def postprocess_output(
+    probabilities,
+    subsampling: int,
+    threshold: float,
+    median_window_length: int,
+    normalize_probs: bool
+) -> np.ndarray:
+    """Threshold probabilities and apply median filter."""
+    filtered = get_hard_decisions(
+        probabilities, threshold, median_window_length, normalize_probs)
     probs_extended = np.repeat(filtered, subsampling, axis=0) # Upsampling
     return probs_extended
+
+
+def get_active_attractor_mask(
+    existence_probs: torch.Tensor,
+    args: SimpleNamespace
+) -> torch.Tensor:
+    """Same active/inactive speaker decision as estimate_diarization_outputs
+    (top-`estimate_spk_qty` by existence prob, or thresholded at
+    `estimate_spk_qty_thr`), but expressed as a fixed-width `(n_attractors,)`
+    0/1 mask instead of dropping inactive columns -- needed so predictions
+    and reference labels line up column-for-column for calculate_metrics."""
+    active_mask = torch.zeros_like(existence_probs)
+    if args.estimate_spk_qty != -1:
+        _, order = torch.sort(existence_probs, descending=True)
+        active_mask[order[:args.estimate_spk_qty]] = 1.0
+    else:
+        active_mask[existence_probs >= args.estimate_spk_qty_thr] = 1.0
+    return active_mask
+
+
+def get_exists_mask(
+    y_probs: torch.Tensor,
+    ref_labels: torch.Tensor,
+) -> torch.Tensor:
+    """Attractor-slot-aligned 1/0 ground truth for whether each predicted
+    attractor slot corresponds to a real reference speaker in this file --
+    the same thing pit_loss_multispk's `exists_mask` return value is,
+    computed the same way (Hungarian assignment on a BCE-style cost between
+    per-frame activation probabilities and reference labels; the "logits"
+    version there and this "probabilities" version are the same formula,
+    since -logsigmoid(logit) == -log(sigmoid(logit)) == -log(p)), needed to
+    compute attractor_accuracy per file the way train.py computes it per
+    batch. `y_probs`/`ref_labels` are both `(T, n_attractors)` -- caller
+    pads/truncates to that shape first."""
+    eps = 1e-6
+    p = y_probs.clamp(eps, 1 - eps)
+    cost_mx = (
+        -torch.log(p).t().matmul(ref_labels)
+        - torch.log(1 - p).t().matmul(1 - ref_labels)
+    )
+    _, ref_alig = linear_sum_assignment(cost_mx.to("cpu"))
+    active_cols = torch.where(ref_labels.sum(axis=0) != 0)[0]
+    n_ref_spk = int(active_cols.max().item()) + 1 if active_cols.numel() > 0 else 0
+    spk_labels = torch.zeros(ref_labels.shape[1])
+    spk_labels[:n_ref_spk] = 1.0
+    return spk_labels[ref_alig]
+
+
+def compute_file_metrics(
+    y_probs: torch.Tensor,
+    existence_probs: torch.Tensor,
+    ref_labels: torch.Tensor,
+    args: SimpleNamespace
+) -> Dict[str, float]:
+    """Whole-file diarization metrics (frame-level DER/miss/FA/confusion,
+    VAD/OSD error rates, attractor existence accuracy), computed with the
+    same decision process used to write the RTTM (existence gating +
+    threshold + median filter) so this is directly informative about what
+    dscore would score -- optionally with the same forgiveness collar
+    dscore uses (via `args.collar`, seconds), computed locally per file
+    instead of requiring a separate dscore run. With `args.collar == 0.0`
+    (the default) this is a strictly harsher, no-collar frame-level metric
+    that reads systematically higher than dscore, especially on short/
+    turn-dense files -- set --collar to make it comparable in absolute
+    terms (e.g. 0.25 for MSDWild, 0.0/unset for RAMC, matching each
+    dataset's dscore convention)."""
+    active_mask = get_active_attractor_mask(existence_probs, args)
+    pred_hard = get_hard_decisions(
+        y_probs * active_mask.unsqueeze(0), args.threshold,
+        args.median_window_length, args.normalize_probs)
+    pred_hard = torch.from_numpy(pred_hard).float()
+    ref_padded = pad_labels_zeros([ref_labels], args.n_attractors)[0]
+    # Frame counts can differ by a couple of frames at file boundaries
+    # between the dataset's and the model's subsampling arithmetic; align
+    # by truncating to the shorter of the two rather than erroring out.
+    n_frames = min(pred_hard.shape[0], ref_padded.shape[0], y_probs.shape[0])
+    # pred_hard/ref_padded are both at the model's native (subsampled)
+    # frame rate -- convert the collar from seconds to frames at that rate.
+    frame_period = args.subsampling * args.frame_shift / args.sampling_rate
+    collar_frames = round(args.collar / frame_period) if args.collar > 0 else 0
+    file_metrics, denominators = calculate_metrics(
+        ref_padded[:n_frames].unsqueeze(0),
+        pred_hard[:n_frames].unsqueeze(0),
+        threshold=0.5, collar_frames=collar_frames,
+        return_denominators=True)
+    file_metrics = {k: float(v) for k, v in file_metrics.items()}
+    # calculate_metrics normalizes VAD_FA/miss and OSD_FA/miss by
+    # active_frames_tot/overlap_frames_tot -- a population disjoint from
+    # what their FA numerators count, so when a file has zero real speech
+    # (silent reference) or zero real overlap (any single-speaker-at-a-time
+    # file, common in MSDWiLD) the rate blows up to an arbitrary multiple of
+    # any nonzero FA count instead of being merely "undefined but small".
+    # Mark those as NaN (undefined for this file) rather than reporting a
+    # meaningless huge number that would dominate a per-file average.
+    if denominators["active_frames_tot"] == 0:
+        file_metrics["VAD_FA"] = float("nan")
+        file_metrics["VAD_miss"] = float("nan")
+    if denominators["overlap_frames_tot"] == 0:
+        file_metrics["OSD_FA"] = float("nan")
+        file_metrics["OSD_miss"] = float("nan")
+    # Same issue for DER/DER_FA/DER_miss/DER_conf, normalized by
+    # speech_frames_tot -- doesn't fire on real MSDWiLD/RAMC files (every
+    # recording has some reference speech) but guard it anyway since it's
+    # the same root cause (a fully-silent-reference file/chunk).
+    if denominators["speech_frames_tot"] == 0:
+        file_metrics["DER"] = float("nan")
+        file_metrics["DER_FA"] = float("nan")
+        file_metrics["DER_miss"] = float("nan")
+        file_metrics["DER_conf"] = float("nan")
+
+    exists_mask = get_exists_mask(
+        y_probs[:n_frames].to("cpu"), ref_padded[:n_frames].to("cpu"))
+    file_metrics["attractor_accuracy"] = (
+        active_mask.to("cpu") == exists_mask
+    ).float().mean().item() * 100
+
+    return file_metrics
 
 
 def parse_arguments() -> SimpleNamespace:
@@ -267,6 +402,37 @@ def parse_arguments() -> SimpleNamespace:
                         action=yamlargparse.ActionConfigFile)
     parser.add_argument('--attractor-existence-loss-weight', default=1.0, type=float,
                         help='weighting parameter')
+    parser.add_argument('--compute-metrics', default=False, type=bool,
+                        help='compute whole-file frame-level diarization '
+                        'metrics (DER/miss/FA/confusion, VAD/OSD error '
+                        'rates, attractor existence accuracy) per '
+                        'recording, using the same '
+                        'existence-gating/threshold/median-filter decision '
+                        'as the RTTM output, macro-averaged over the test '
+                        'set. Writes metrics_per_file.csv and '
+                        'metrics_summary.txt into the run\'s rttms_dir '
+                        '(sibling of the rttms/ subdirectory). This is a '
+                        'frame-level metric (no forgiveness collar unless '
+                        '--collar is set), not a substitute for dscore '
+                        'scoring -- it is meant for fast, local per-file '
+                        'weakness analysis.')
+    parser.add_argument('--collar', default=0.0, type=float,
+                        help='forgiveness collar in seconds for '
+                        '--compute-metrics, mirroring dscore/md-eval.pl\'s '
+                        '--collar: frames within this many seconds of a '
+                        'reference speaker-turn boundary are excluded from '
+                        'scoring. Default 0.0 (no collar, original '
+                        'behavior). Only affects --compute-metrics output, '
+                        'not the RTTM written to rttms_dir. Use 0.25 to '
+                        'match MSDWild\'s dscore convention, 0.0 (i.e. '
+                        'leave unset) for RAMC\'s. Since this doesn\'t '
+                        'change the RTTM, changing only --collar against an '
+                        '--rttms-dir that already has RTTMs from a previous '
+                        'run will skip inference for every file (see the '
+                        '"RTTM already exists" warning below) -- point '
+                        '--rttms-dir at a fresh directory to get complete '
+                        'metrics_per_file.csv/metrics_summary.txt with the '
+                        'new collar.')
     parser.add_argument('--attractor-frame-comparison', default='dotprod',
                         type=str, choices=['dotprod', 'xattention'],
                         help='how to compare attractors and frame embeddings')
@@ -460,10 +626,28 @@ if __name__ == '__main__':
     )
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
+    metric_keys = [
+        'DER', 'DER_miss', 'DER_FA', 'DER_conf',
+        'VAD_FA', 'VAD_miss', 'OSD_FA', 'OSD_miss',
+        'avg_ref_spk_qty', 'avg_pred_spk_qty', 'attractor_accuracy',
+    ]
+    # VAD_FA/VAD_miss/OSD_FA/OSD_miss can be NaN per file (undefined --
+    # e.g. no real overlap in that file, see compute_file_metrics), so each
+    # key is averaged over however many files actually defined it, not
+    # blindly over n_scored.
+    acum_test_metrics = {k: 0.0 for k in metric_keys}
+    acum_test_counts = {k: 0 for k in metric_keys}
+    per_file_metrics = []
+
     infer_pbar = tqdm(infer_loader, total=len(infer_loader))
     for batch in infer_pbar:
         name = batch['names'][0]
         if os.path.exists(join(out_dir, f"{name}.rttm")):
+            if args.compute_metrics:
+                logging.warning(
+                    f"{name}: RTTM already exists, skipping inference -- "
+                    "this file will be missing from metrics_per_file.csv. "
+                    "Rerun into an empty --rttms-dir for complete metrics.")
             continue
         try:
             input = torch.stack(batch['xs']).to(args.device)
@@ -516,6 +700,19 @@ if __name__ == '__main__':
         except Exception as e:
             logging.error(f"{name}: postprocessing failed: {e}")
             continue
+
+        if args.compute_metrics:
+            try:
+                file_metrics = compute_file_metrics(
+                    y_probs, existence_probs, batch['ts'][0], args)
+                for k in metric_keys:
+                    if not np.isnan(file_metrics[k]):
+                        acum_test_metrics[k] += file_metrics[k]
+                        acum_test_counts[k] += 1
+                per_file_metrics.append({'name': name, **file_metrics})
+            except Exception as e:
+                logging.error(f"{name}: metrics computation failed: {e}")
+
         if args.plot_output:
             fig, axs = plt.subplots(y_probs.shape[1]+1)
             fig.set_figwidth(y_probs.shape[0]/100)
@@ -562,3 +759,50 @@ if __name__ == '__main__':
             plt.close()
             plt.cla()
             plt.clf()
+
+    if args.compute_metrics:
+        metrics_dir = os.path.dirname(out_dir)  # strip the trailing "rttms"
+        csv_filename = join(metrics_dir, "metrics_per_file.csv")
+        with open(csv_filename, 'w', newline='', encoding='UTF-8') as csv_file:
+            writer = csv.DictWriter(
+                csv_file, fieldnames=['name'] + metric_keys)
+            writer.writeheader()
+            for row in per_file_metrics:
+                writer.writerow(row)
+
+        n_scored = len(per_file_metrics)
+        summary_filename = join(metrics_dir, "metrics_summary.txt")
+        with open(summary_filename, 'w', encoding='UTF-8') as summary_file:
+            if n_scored == 0:
+                summary_file.write("No files were scored.\n")
+                logging.warning("--compute-metrics: no files were scored.")
+            else:
+                # Each key averaged over the files that actually defined it
+                # (see acum_test_counts -- VAD_FA/miss and OSD_FA/miss are
+                # undefined, not zero, for files with no real speech/overlap
+                # respectively, and are excluded rather than included as 0).
+                avg_metrics = {
+                    k: (acum_test_metrics[k] / acum_test_counts[k]
+                        if acum_test_counts[k] > 0 else float("nan"))
+                    for k in metric_keys}
+                summary_line = (
+                    f"n_files={n_scored} collar={args.collar}s "
+                    f"DER={avg_metrics['DER']:.2f}% "
+                    f"(miss={avg_metrics['DER_miss']:.2f} "
+                    f"fa={avg_metrics['DER_FA']:.2f} "
+                    f"conf={avg_metrics['DER_conf']:.2f}) "
+                    f"VAD(fa/miss)={avg_metrics['VAD_FA']:.2f}/"
+                    f"{avg_metrics['VAD_miss']:.2f} "
+                    f"(n={acum_test_counts['VAD_FA']}) "
+                    f"OSD(fa/miss)={avg_metrics['OSD_FA']:.2f}/"
+                    f"{avg_metrics['OSD_miss']:.2f} "
+                    f"(n={acum_test_counts['OSD_FA']}) "
+                    f"spk_qty(ref/pred)={avg_metrics['avg_ref_spk_qty']:.2f}/"
+                    f"{avg_metrics['avg_pred_spk_qty']:.2f} "
+                    f"attractor_acc={avg_metrics['attractor_accuracy']:.2f}%"
+                )
+                summary_file.write(summary_line + "\n")
+                logging.info(f"--compute-metrics summary: {summary_line}")
+        logging.info(
+            f"Per-file metrics written to {csv_filename}, "
+            f"summary written to {summary_filename}")
