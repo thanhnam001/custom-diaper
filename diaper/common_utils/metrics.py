@@ -36,11 +36,15 @@ def calculate_metrics(
     # collar_frames every sequence in the batch can end up with zero frames
     # left to score (all `continue`d), in which case these are never
     # reassigned by a tensor `+=` below and torch.round() further down
-    # needs a Tensor, not a plain int, to not blow up.
-    res["DER_miss"] = torch.tensor(0.0)
-    res["DER_FA"] = torch.tensor(0.0)
-    res["DER_conf"] = torch.tensor(0.0)
-    res["DER"] = torch.tensor(0.0)
+    # needs a Tensor, not a plain int, to not blow up. Placed on
+    # target.device (not the default CPU) since the `+=` below adds
+    # GPU-resident per-sequence sums (from target/decisions) onto these
+    # during training -- a CPU-initialized tensor would make that `+=`
+    # fail with "Expected all tensors to be on the same device".
+    res["DER_miss"] = torch.tensor(0.0, device=target.device)
+    res["DER_FA"] = torch.tensor(0.0, device=target.device)
+    res["DER_conf"] = torch.tensor(0.0, device=target.device)
+    res["DER"] = torch.tensor(0.0, device=target.device)
     res["VAD_FA"] = 0
     res["VAD_miss"] = 0
     res["OSD_FA"] = 0
@@ -62,7 +66,7 @@ def calculate_metrics(
 
         if collar_frames > 0 and t_seq.shape[0] > 0:
             changed = (t_seq[1:] != t_seq[:-1]).any(dim=1)
-            is_boundary = torch.zeros(t_seq.shape[0])
+            is_boundary = torch.zeros(t_seq.shape[0], device=t_seq.device)
             is_boundary[0] = 1.0
             is_boundary[1:] = changed.float()
             # Dilate each boundary frame by +/-collar_frames via a max-pool
