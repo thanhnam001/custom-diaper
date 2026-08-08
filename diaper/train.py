@@ -50,15 +50,17 @@ from common_utils.metrics import (
     update_metrics,
 )
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from types import SimpleNamespace
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import functools
 import logging
 import numpy as np
 import random
 import threadpoolctl
 import torch
+import torch.distributed as dist
 import yamlargparse
 from tqdm import tqdm
 
@@ -350,11 +352,19 @@ def compute_loss_and_metrics(
 
 def get_training_dataloaders(
     args: SimpleNamespace
-) -> Tuple[DataLoader, DataLoader]:
-    if args.gpu >= 1:
+) -> Tuple[DataLoader, DataLoader, Optional[DistributedSampler]]:
+    distributed = getattr(args, 'distributed', False)
+    if args.gpu >= 1 and not distributed:
+        # DataParallel path: a single process feeds every GPU from one
+        # big batch that DataParallel scatters internally.
         train_batchsize = args.train_batchsize * args.gpu
         dev_batchsize = args.dev_batchsize * args.gpu
     else:
+        # DDP path (each rank owns exactly one GPU and a DistributedSampler
+        # shards the dataset across ranks instead, so the per-process batch
+        # size is the plain configured one -- the *global* batch across all
+        # ranks, train_batchsize * world_size, still matches the
+        # DataParallel case above since world_size == args.gpu) or CPU.
         train_batchsize = args.train_batchsize
         dev_batchsize = args.dev_batchsize
 
@@ -380,12 +390,18 @@ def get_training_dataloaders(
             specaugment=args.specaugment,
         )
 
+        train_sampler = DistributedSampler(
+            train_set, num_replicas=args.world_size, rank=args.rank,
+            shuffle=True, seed=args.seed
+        ) if distributed else None
+
         train_loader = DataLoader(
             train_set,
             batch_size=train_batchsize,
             collate_fn=_convert,
             num_workers=args.num_workers,
-            shuffle=True,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
             worker_init_fn=functools.partial(
                 _init_fn, num_threads=args.num_threads),
         )
@@ -440,12 +456,18 @@ def get_training_dataloaders(
             specaugment=args.specaugment,
         )
 
+        train_sampler = DistributedSampler(
+            train_set, num_replicas=args.world_size, rank=args.rank,
+            shuffle=True, seed=args.seed
+        ) if distributed else None
+
         train_loader = DataLoader(
             train_set,
             batch_size=train_batchsize,
             collate_fn=_convert,
             num_workers=args.num_workers,
-            shuffle=True,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
             worker_init_fn=functools.partial(
                 _init_fn, num_threads=args.num_threads),
         )
@@ -474,11 +496,17 @@ def get_training_dataloaders(
             features_dir=args.valid_features_dir,
             batch_size=args.dev_batchsize)
 
+        train_sampler = DistributedSampler(
+            train_set, num_replicas=args.world_size, rank=args.rank,
+            shuffle=True, seed=args.seed
+        ) if distributed else None
+
         train_loader = DataLoader(
             train_set,
             batch_size=train_batchsize,
             collate_fn=_convert,
             num_workers=args.num_workers,
+            sampler=train_sampler,
             worker_init_fn=functools.partial(
                 _init_fn, num_threads=args.num_threads),
         )
@@ -492,7 +520,7 @@ def get_training_dataloaders(
                 _init_fn, num_threads=args.num_threads),
         )
 
-    return train_loader, dev_loader
+    return train_loader, dev_loader, train_sampler
 
 
 def optimizer_to(optim, device):
@@ -570,6 +598,20 @@ def parse_arguments() -> SimpleNamespace:
                         help='If True, avoid backpropagation on attractor loss')
     parser.add_argument('--dev-batchsize', default=1, type=int,
                         help='number of utterances in one development batch')
+    parser.add_argument('--dist-backend', default='gloo', type=str,
+                        choices=['gloo', 'nccl'],
+                        help='torch.distributed backend used for '
+                        'single-node multi-GPU DDP training (--gpu > 1); '
+                        'ignored otherwise. Defaults to gloo since NCCL is '
+                        'not available on Windows -- pass nccl explicitly '
+                        'on a Linux box with NCCL installed for faster '
+                        'GPU-GPU collectives.')
+    parser.add_argument('--dist-port', default=29500, type=int,
+                        help='TCP port on localhost used as the rendezvous '
+                        'point for single-node multi-GPU DDP training '
+                        '(--gpu > 1); ignored otherwise. Change this if '
+                        'running more than one DDP training job on the '
+                        'same machine at once, so they do not collide.')
     parser.add_argument('--dropout', type=float,
                         help='dropout for the rest of the model')
     parser.add_argument('--dropout_attractors', type=float,
@@ -785,9 +827,46 @@ def parse_arguments() -> SimpleNamespace:
     return args
 
 
-if __name__ == '__main__':
+_METRIC_KEYS = list(new_metrics().keys())
 
-    args = parse_arguments()
+
+def _allreduce_sum_metrics(
+    metrics: Dict[str, float], device: torch.device
+) -> Dict[str, float]:
+    """Sum a train-loop metrics accumulator (see common_utils/metrics.py::
+    new_metrics) across all DDP ranks, so the periodic training-metric log/
+    TensorBoard report reflects the whole global batch for this window
+    instead of just this rank's local shard of the data. Returns a new
+    dict; does not mutate `metrics` (each rank keeps accumulating its own
+    local copy after this)."""
+    packed = torch.tensor([metrics[k] for k in _METRIC_KEYS], device=device)
+    dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+    return {k: packed[i].item() for i, k in enumerate(_METRIC_KEYS)}
+
+
+def main_worker(rank: int, world_size: int, args: SimpleNamespace) -> None:
+    args.distributed = world_size > 1
+    args.rank = rank
+    args.world_size = world_size
+
+    if args.gpu >= 1:
+        args.local_rank = rank if args.distributed else 0
+        if args.distributed:
+            torch.cuda.set_device(args.local_rank)
+    else:
+        args.local_rank = 0
+
+    if args.distributed:
+        # Single-node multi-GPU DDP, rendezvoused over a loopback TCP
+        # socket rather than the MASTER_ADDR/RANK/WORLD_SIZE env vars
+        # torchrun would normally set -- this process was launched by
+        # plain `python train.py` (via torch.multiprocessing.spawn below),
+        # not torchrun.
+        dist.init_process_group(
+            backend=args.dist_backend,
+            init_method=f"tcp://127.0.0.1:{args.dist_port}",
+            world_size=world_size,
+            rank=rank)
 
     if args.num_threads > 0:
         # Caps torch's own intra-op thread pool (used by the model forward/
@@ -814,13 +893,22 @@ if __name__ == '__main__':
 
     torch.multiprocessing.set_sharing_strategy('file_system')
 
-    logging.info(args)
-
-    writer = SummaryWriter(f"{args.output_path}/tensorboard")
+    if rank == 0:
+        logging.info(args)
+        writer = SummaryWriter(f"{args.output_path}/tensorboard")
+    else:
+        writer = None
 
     if args.gpu >= 1:
-        args.device = torch.device("cuda")
-        args.log_report_batches_num = int(args.log_report_batches_num / args.gpu)
+        args.device = torch.device(
+            f"cuda:{args.local_rank}") if args.distributed \
+            else torch.device("cuda")
+        # DDP: each rank already processes only 1/world_size of the data
+        # per epoch (via DistributedSampler), same effective shrinkage as
+        # DataParallel's `* args.gpu` batch-size multiplier below.
+        divisor = world_size if args.distributed else args.gpu
+        args.log_report_batches_num = max(
+            1, int(args.log_report_batches_num / divisor))
         torch.multiprocessing.set_sharing_strategy('file_system')
     else:
         args.device = torch.device("cpu")
@@ -829,11 +917,12 @@ if __name__ == '__main__':
     if args.init_model_path != '':
         model = average_checkpoints(
             args.device, model, args.init_model_path, args.init_epochs,
-            allow_partial=args.allow_partial_warmstart)
+            allow_partial=args.allow_partial_warmstart,
+            distributed=args.distributed, local_rank=args.local_rank)
 
     # Built before optimizer setup: auto-computing the noam schedule below
     # needs the training dataloader's length (iters per epoch).
-    train_loader, dev_loader = get_training_dataloaders(args)
+    train_loader, dev_loader, train_sampler = get_training_dataloaders(args)
 
     if args.optimizer == 'noam' and (
             args.noam_model_size is None or args.noam_warmup_steps is None):
@@ -842,12 +931,13 @@ if __name__ == '__main__':
             args.max_epochs, iters_per_epoch,
             args.noam_warmup_fraction, args.noam_peak_lr)
         total_steps = args.max_epochs * iters_per_epoch
-        logging.info(
-            f"Auto-computed noam schedule from {args.max_epochs} epochs x "
-            f"{iters_per_epoch} iters/epoch = {total_steps} total steps: "
-            f"noam_model_size={args.noam_model_size}, "
-            f"noam_warmup_steps={args.noam_warmup_steps} "
-            f"({100 * args.noam_warmup_steps / total_steps:.1f}% of total)")
+        if rank == 0:
+            logging.info(
+                f"Auto-computed noam schedule from {args.max_epochs} epochs x "
+                f"{iters_per_epoch} iters/epoch = {total_steps} total steps: "
+                f"noam_model_size={args.noam_model_size}, "
+                f"noam_warmup_steps={args.noam_warmup_steps} "
+                f"({100 * args.noam_warmup_steps / total_steps:.1f}% of total)")
 
     optimizer = setup_optimizer(args, model)
 
@@ -858,6 +948,9 @@ if __name__ == '__main__':
     # for checkpoint_0.tar: with --keep-last-n-checkpoints pruning, epoch 0
     # is not special and may itself have been deleted by the time a run is
     # resumed, so its absence must not be mistaken for "never started".
+    # Every rank does this listing/loading independently off the shared
+    # filesystem (deterministic, no writes happen before this point), so no
+    # broadcast of the resolved path/epoch is needed.
     directory = os.path.join(args.output_path, 'models')
     checkpoints = os.listdir(directory) if os.path.isdir(directory) else []
     paths = [os.path.join(directory, basename) for
@@ -870,8 +963,12 @@ if __name__ == '__main__':
         init_epoch = epoch
     else:
         init_epoch = 0
-        # Save initial model
-        save_checkpoint(args, init_epoch, model, optimizer, 0)
+        # Save initial model -- rank 0 only, to avoid every rank writing
+        # the same file concurrently.
+        if rank == 0:
+            save_checkpoint(args, init_epoch, model, optimizer, 0)
+        if args.distributed:
+            dist.barrier()
 
     model.to(args.device)
     train_batches_qty = 0
@@ -880,6 +977,12 @@ if __name__ == '__main__':
     epochs_without_improvement = 0
 
     for epoch in range(int(round(init_epoch)), args.max_epochs):
+        if args.distributed and train_sampler is not None:
+            # Reseeds the per-epoch shuffle so all ranks draw a fresh
+            # (but still synchronized-disjoint) shard split each epoch;
+            # without this DistributedSampler replays the same order
+            # every epoch.
+            train_sampler.set_epoch(epoch)
         model.train()
         # Discard any partial-window leftovers from the previous epoch's
         # tail (len(train_loader) is rarely an exact multiple of
@@ -892,8 +995,9 @@ if __name__ == '__main__':
         # which has a hard 100% ceiling per batch and so can't legitimately
         # exceed 100% otherwise).
         acum_train_metrics = reset_metrics(acum_train_metrics)
-        train_pbar = tqdm(train_loader, total=len(train_loader))
-        for i, batch in enumerate(train_pbar):
+        train_iterable = tqdm(train_loader, total=len(train_loader)) \
+            if rank == 0 else train_loader
+        for i, batch in enumerate(train_iterable):
             train_batches_qty += 1
             features = batch['xs']
             labels = batch['ts']
@@ -909,92 +1013,153 @@ if __name__ == '__main__':
             loss, acum_train_metrics = compute_loss_and_metrics(
                 model, labels, features, n_speakers,
                 spkids, acum_train_metrics, args)
-            if not torch.isfinite(loss):
-                train_pbar.write(
-                    f"[epoch {epoch + 1}] batch {i + 1}: non-finite loss "
-                    f"({loss.item()}), skipping update. "
-                    f"names={batch['names'][:2]}")
+            # DDP's backward is a collective op every rank must enter
+            # together each iteration -- if only some ranks skip it (e.g.
+            # because non-finite loss happened to hit only their local
+            # batch), the others hang waiting for gradient sync. Sync the
+            # skip decision first so every rank skips (or none do).
+            skip = torch.tensor(
+                [0.0 if torch.isfinite(loss) else 1.0], device=args.device)
+            if args.distributed:
+                dist.all_reduce(skip, op=dist.ReduceOp.MAX)
+            if skip.item() > 0.5:
+                if rank == 0:
+                    train_iterable.write(
+                        f"[epoch {epoch + 1}] batch {i + 1}: non-finite "
+                        f"loss on at least one rank ({loss.item()} on rank "
+                        f"{rank}), skipping update. "
+                        f"names={batch['names'][:2]}")
                 optimizer.zero_grad()
                 continue
-            train_pbar.set_postfix(loss=f"{loss.item():.4f}")
+            if rank == 0:
+                train_iterable.set_postfix(loss=f"{loss.item():.4f}")
             if i % args.log_report_batches_num == \
                     (args.log_report_batches_num-1):
-                train_pbar.write(
-                    f"[epoch {epoch + 1}] batch {i + 1}/{len(train_loader)} "
-                    f"train: " + _format_metrics(
-                        acum_train_metrics, args.log_report_batches_num))
-                for k in acum_train_metrics.keys():
+                report_metrics = acum_train_metrics
+                report_denom = args.log_report_batches_num
+                if args.distributed:
+                    report_metrics = _allreduce_sum_metrics(
+                        acum_train_metrics, args.device)
+                    report_denom = args.log_report_batches_num * world_size
+                if rank == 0:
+                    train_iterable.write(
+                        f"[epoch {epoch + 1}] batch {i + 1}/{len(train_loader)} "
+                        f"train: " + _format_metrics(
+                            report_metrics, report_denom))
+                    for k in report_metrics.keys():
+                        writer.add_scalar(
+                            f"train_{k}",
+                            report_metrics[k] / report_denom,
+                            train_batches_qty)
                     writer.add_scalar(
-                        f"train_{k}",
-                        acum_train_metrics[k] / args.log_report_batches_num,
-                        train_batches_qty)
-                writer.add_scalar(
-                    "lrate",
-                    get_rate(optimizer), train_batches_qty)
+                        "lrate",
+                        get_rate(optimizer), train_batches_qty)
                 acum_train_metrics = reset_metrics(acum_train_metrics)
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradclip)
             optimizer.step()
 
-            if not (args.save_intermediate == -1):
+            if rank == 0 and not (args.save_intermediate == -1):
                 if i % args.save_intermediate == (args.save_intermediate-1):
                     save_checkpoint(args, epoch + (i / 100.0), model, optimizer, loss)
 
-        save_checkpoint(args, epoch+1, model, optimizer, loss)
+        if rank == 0:
+            save_checkpoint(args, epoch+1, model, optimizer, loss)
+        if args.distributed:
+            dist.barrier()
 
-        dev_batches_qty = 0
-        with torch.no_grad():
-            model.eval()
-            dev_pbar = tqdm(dev_loader, total=len(dev_loader))
-            for i, batch in enumerate(dev_pbar):
-                features = batch['xs']
-                labels = batch['ts']
-                spkids = batch['spk_ids']
-                n_speakers = np.asarray([max(torch.where(t.sum(0) != 0)[0]) + 1
-                                        if t.sum() > 0 else 0 for t in labels])
-                max_n_speakers = args.n_attractors
-                features, labels = pad_sequence(
-                    features, labels, args.num_frames)
-                labels = pad_labels_zeros(labels, max_n_speakers)
-                features = torch.stack(features).to(args.device)
-                labels = torch.stack(labels).to(args.device)
-                dev_loss, acum_dev_metrics = compute_loss_and_metrics(
-                    model, labels, features, n_speakers,
-                    spkids, acum_dev_metrics, args)
-                if not torch.isfinite(dev_loss):
-                    dev_pbar.write(
-                        f"[epoch {epoch + 1}] dev batch {i + 1}: non-finite "
-                        f"loss ({dev_loss.item()}), excluded from metrics. "
-                        f"names={batch['names'][:2]}")
-                    continue
-                dev_batches_qty += 1
-                dev_pbar.set_postfix(loss=f"{dev_loss.item():.4f}")
-        if dev_batches_qty > 0:
-            for k in acum_dev_metrics.keys():
-                writer.add_scalar(
-                    f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
-                    epoch * dev_batches_qty + i)
-            print(f'Done epoch {epoch + 1}/{args.max_epochs} | dev: '
-                  + _format_metrics(acum_dev_metrics, dev_batches_qty))
+        stop_flag = torch.zeros(1, device=args.device)
+        if rank == 0:
+            # Dev evaluation runs on rank 0 only (other ranks wait at the
+            # barrier below): the dev set is comparatively small and this
+            # avoids needing to gather calculate_metrics' per-batch numbers
+            # across ranks just for a diagnostic mid-training metric --
+            # final DER reporting for the paper reproduction goes through
+            # infer.py + dscore on RTTMs, not this loop.
+            dev_batches_qty = 0
+            with torch.no_grad():
+                model.eval()
+                dev_pbar = tqdm(dev_loader, total=len(dev_loader))
+                for i, batch in enumerate(dev_pbar):
+                    features = batch['xs']
+                    labels = batch['ts']
+                    spkids = batch['spk_ids']
+                    n_speakers = np.asarray([max(torch.where(t.sum(0) != 0)[0]) + 1
+                                            if t.sum() > 0 else 0 for t in labels])
+                    max_n_speakers = args.n_attractors
+                    features, labels = pad_sequence(
+                        features, labels, args.num_frames)
+                    labels = pad_labels_zeros(labels, max_n_speakers)
+                    features = torch.stack(features).to(args.device)
+                    labels = torch.stack(labels).to(args.device)
+                    dev_loss, acum_dev_metrics = compute_loss_and_metrics(
+                        model, labels, features, n_speakers,
+                        spkids, acum_dev_metrics, args)
+                    if not torch.isfinite(dev_loss):
+                        dev_pbar.write(
+                            f"[epoch {epoch + 1}] dev batch {i + 1}: non-finite "
+                            f"loss ({dev_loss.item()}), excluded from metrics. "
+                            f"names={batch['names'][:2]}")
+                        continue
+                    dev_batches_qty += 1
+                    dev_pbar.set_postfix(loss=f"{dev_loss.item():.4f}")
+            if dev_batches_qty > 0:
+                for k in acum_dev_metrics.keys():
+                    writer.add_scalar(
+                        f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
+                        epoch * dev_batches_qty + i)
+                print(f'Done epoch {epoch + 1}/{args.max_epochs} | dev: '
+                      + _format_metrics(acum_dev_metrics, dev_batches_qty))
 
-            if args.early_stopping:
-                dev_der = acum_dev_metrics['DER'] / dev_batches_qty
-                if dev_der < best_dev_der:
-                    best_dev_der = dev_der
-                    epochs_without_improvement = 0
-                else:
-                    epochs_without_improvement += 1
-                    print(f'Dev DER did not improve for '
-                          f'{epochs_without_improvement} epoch(s) '
-                          f'(best: {best_dev_der:.2f})')
-                if epochs_without_improvement >= args.early_stopping_patience:
-                    print(f'Early stopping: dev DER has not improved for '
-                          f'{args.early_stopping_patience} epochs, '
-                          f'stopping finetuning at epoch {epoch + 1}.')
-                    acum_dev_metrics = reset_metrics(acum_dev_metrics)
-                    break
-        else:
-            print(f'Done epoch {epoch + 1}/{args.max_epochs} | dev: all '
-                  'batches produced non-finite loss -- model has diverged')
-        acum_dev_metrics = reset_metrics(acum_dev_metrics)
+                if args.early_stopping:
+                    dev_der = acum_dev_metrics['DER'] / dev_batches_qty
+                    if dev_der < best_dev_der:
+                        best_dev_der = dev_der
+                        epochs_without_improvement = 0
+                    else:
+                        epochs_without_improvement += 1
+                        print(f'Dev DER did not improve for '
+                              f'{epochs_without_improvement} epoch(s) '
+                              f'(best: {best_dev_der:.2f})')
+                    if epochs_without_improvement >= args.early_stopping_patience:
+                        print(f'Early stopping: dev DER has not improved for '
+                              f'{args.early_stopping_patience} epochs, '
+                              f'stopping finetuning at epoch {epoch + 1}.')
+                        acum_dev_metrics = reset_metrics(acum_dev_metrics)
+                        stop_flag[0] = 1.0
+            else:
+                print(f'Done epoch {epoch + 1}/{args.max_epochs} | dev: all '
+                      'batches produced non-finite loss -- model has diverged')
+            acum_dev_metrics = reset_metrics(acum_dev_metrics)
+
+        if args.distributed:
+            # Wait for rank 0's dev pass to finish before it can decide
+            # (and broadcast) whether to stop, then have every rank act on
+            # the same decision so they all `break` together -- otherwise
+            # the next epoch's collective forward/backward would hang with
+            # some ranks gone.
+            dist.barrier()
+            dist.broadcast(stop_flag, src=0)
+        if stop_flag.item() > 0.5:
+            break
+
+    if args.distributed:
+        dist.destroy_process_group()
+
+
+if __name__ == '__main__':
+    args = parse_arguments()
+    world_size = args.gpu if args.gpu > 1 else 1
+    if world_size > 1:
+        # Single-node multi-GPU DDP, launched directly via `python
+        # train.py` -- no torchrun: one process per GPU, spawned here
+        # (torch.multiprocessing.spawn always uses the 'spawn' start
+        # method, which is also the only one available on Windows) and
+        # coordinated over a loopback TCP rendezvous (see --dist-port)
+        # instead of torchrun-provided env vars.
+        torch.multiprocessing.spawn(
+            main_worker, args=(world_size, args), nprocs=world_size,
+            join=True)
+    else:
+        main_worker(0, world_size, args)

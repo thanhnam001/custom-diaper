@@ -17,6 +17,7 @@ from backend.updater import (
     setup_optimizer,
 )
 from pathlib import Path
+from torch.nn.parallel import DistributedDataParallel
 from transformers.models.perceiver.configuration_perceiver import PerceiverConfig
 from transformers.models.perceiver.modeling_perceiver import PerceiverEncoder
 from types import SimpleNamespace
@@ -92,12 +93,38 @@ def load_initmodel(args: SimpleNamespace):
     return load_checkpoint(args, args.initmodel)
 
 
+def _wrap_ddp(
+    module: torch.nn.Module,
+    device: torch.device,
+    local_rank: int,
+) -> torch.nn.Module:
+    device_ids = [local_rank] if device.type == 'cuda' else None
+    output_device = local_rank if device.type == 'cuda' else None
+    # find_unused_parameters=True: AttractorPerceiver has several auxiliary
+    # heads/paths that are unconditionally instantiated but only enter the
+    # forward/backward graph depending on config (e.g. a *-loss-weight of 0
+    # in args, see backend/losses.py::get_loss) -- any parameters that go
+    # untouched for a whole iteration make plain DDP error out during
+    # backward, so this is kept on as a safety net across configs rather
+    # than tracked per-option.
+    return DistributedDataParallel(
+        module, device_ids=device_ids, output_device=output_device,
+        find_unused_parameters=True)
+
+
 def get_model(args: SimpleNamespace) -> torch.nn.Module:
     args.in_size = args.feature_dim * (1 + 2 * args.context_size)
     if args.model_type == 'AttractorPerceiver':
         model = AttractorPerceiver(args)
     else:
         raise ValueError('Possible model_type is "AttractorPerceiver"')
+    if getattr(args, 'distributed', False):
+        # AttractorPerceiver already builds every submodule directly on
+        # args.device (see its __init__, which is passed args.device as
+        # self.device), so the module is already on the right GPU before
+        # wrapping -- no .to(device) needed here, unlike DataParallel below
+        # which scatters/gathers across devices per forward call instead.
+        return _wrap_ddp(model, args.device, getattr(args, 'local_rank', 0))
     return torch.nn.DataParallel(model)
 
 
@@ -128,12 +155,22 @@ def average_checkpoints(
     models_path: str,
     epochs: str,
     allow_partial: bool = False,
+    distributed: bool = False,
+    local_rank: int = 0,
 ) -> torch.nn.Module:
     epochs = parse_epochs(epochs)
     states_dict_list = []
     own_state = model.state_dict()
+    # Averaged via throwaway DataParallel copies of the raw underlying
+    # module, not copy.deepcopy(model) directly: when `model` is
+    # DistributedDataParallel-wrapped (see get_model), deepcopy drags along
+    # its process-group/reducer state, which is not deepcopy-safe.
+    # DataParallel and DistributedDataParallel both name their wrapped
+    # submodule `module`, so a DataParallel copy's state_dict() keys
+    # ("module.xxx") line up with checkpoints saved from either wrapper.
+    base_module = model.module if hasattr(model, 'module') else model
     for e in epochs:
-        copy_model = copy.deepcopy(model)
+        copy_model = torch.nn.DataParallel(copy.deepcopy(base_module))
         checkpoint = torch.load(join(
             models_path,
             f"checkpoint_{e}.tar"), map_location=device)
@@ -153,10 +190,12 @@ def average_checkpoints(
             copy_model.load_state_dict(ckpt_state)
         states_dict_list.append(copy_model.state_dict())
     avg_state_dict = average_states(states_dict_list, device)
-    avg_model = copy.deepcopy(model)
+    avg_model = torch.nn.DataParallel(copy.deepcopy(base_module))
     avg_model.load_state_dict(avg_state_dict)
     if device == torch.device('cpu'):
-        avg_model = avg_model.module
+        return avg_model.module
+    if distributed:
+        return _wrap_ddp(avg_model.module, device, local_rank)
     return avg_model
 
 
