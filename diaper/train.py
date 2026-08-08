@@ -101,7 +101,11 @@ def _format_metrics(metrics: Dict[str, float], n: float) -> str:
         f"conf={avg['DER_conf']:.2f}) "
         f"spk_qty(ref/pred)={avg['avg_ref_spk_qty']:.2f}/"
         f"{avg['avg_pred_spk_qty']:.2f} "
-        f"attractor_acc={avg['attractor_accuracy']:.2f}%"
+        f"attractor_acc={avg['attractor_accuracy']:.2f}% "
+        f"attractorfree_DER={avg['attractorfree_DER']:.2f}% "
+        f"(miss={avg['attractorfree_DER_miss']:.2f} "
+        f"fa={avg['attractorfree_DER_FA']:.2f} "
+        f"conf={avg['attractorfree_DER_conf']:.2f})"
     )
 
 
@@ -314,7 +318,19 @@ def compute_loss_and_metrics(
     metrics = calculate_metrics(
         labels.detach(), y_probs_gated.detach(), threshold=0.5)
 
+    # Old (pre-1a270c4) metric definition, monitored alongside the gated one
+    # above: raw per-frame activation probabilities, no attractor-existence
+    # gating -- watch whether it keeps improving with more training epochs
+    # even once the gated dev_DER has plateaued.
+    metrics_attractorfree = calculate_metrics(
+        labels.detach(), y_probs.detach(), threshold=0.5)
+
     acum_metrics = update_metrics(acum_metrics, metrics)
+    for k in [
+        'avg_pred_spk_qty', 'DER_FA', 'DER_miss', 'DER_conf', 'DER',
+        'VAD_FA', 'VAD_miss', 'OSD_FA', 'OSD_miss',
+    ]:
+        acum_metrics[f'attractorfree_{k}'] += metrics_attractorfree[k]
     acum_metrics['attractor_accuracy'] += attractor_accuracy
     acum_metrics['loss'] += loss.item()
     acum_metrics['activation_loss_BCE'] += activation_loss_BCE.item()

@@ -186,7 +186,20 @@ def new_metrics() -> Dict[str, float]:
         'VAD_FA',
         'VAD_miss',
         'OSD_FA',
-        'OSD_miss'
+        'OSD_miss',
+        # Old (pre-1a270c4) metric definition, kept alongside the
+        # existence-gated one above for comparison: calculate_metrics on raw
+        # per-frame activation probabilities, no attractor-existence
+        # gating -- see diaper_old_vs_new_der_metric memory.
+        'attractorfree_avg_pred_spk_qty',
+        'attractorfree_DER_FA',
+        'attractorfree_DER_miss',
+        'attractorfree_DER_conf',
+        'attractorfree_DER',
+        'attractorfree_VAD_FA',
+        'attractorfree_VAD_miss',
+        'attractorfree_OSD_FA',
+        'attractorfree_OSD_miss'
     ]:
         metrics[k] = 0.0
     return metrics
