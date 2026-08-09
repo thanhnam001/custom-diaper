@@ -315,7 +315,7 @@ def get_loss(
     else:
         att_qty_loss = get_attractor_quantity_loss(attractors_logits, n_speakers)
     if args.spk_counting_loss_weight == 0:
-        spk_counting_loss = 0
+        spk_counting_loss = torch.zeros((), device=attractors_logits.device)
     else:
         assert args.use_spk_counting_head, \
             "--spk-counting-loss-weight > 0 requires --use-spk-counting-head " \
