@@ -633,14 +633,14 @@ def parse_arguments() -> SimpleNamespace:
                         help='If True, avoid backpropagation on attractor loss')
     parser.add_argument('--dev-batchsize', default=1, type=int,
                         help='number of utterances in one development batch')
-    parser.add_argument('--dist-backend', default='gloo', type=str,
+    parser.add_argument('--dist-backend', default='nccl', type=str,
                         choices=['gloo', 'nccl'],
                         help='torch.distributed backend used for '
                         'single-node multi-GPU DDP training (--gpu > 1); '
-                        'ignored otherwise. Defaults to gloo since NCCL is '
-                        'not available on Windows -- pass nccl explicitly '
-                        'on a Linux box with NCCL installed for faster '
-                        'GPU-GPU collectives.')
+                        'ignored otherwise. Defaults to nccl (training '
+                        'always runs on Linux GPU boxes here) -- pass gloo '
+                        'explicitly if you ever need to run DDP on Windows '
+                        'or another box without NCCL installed.')
     parser.add_argument('--dist-port', default=29500, type=int,
                         help='TCP port on localhost used as the rendezvous '
                         'point for single-node multi-GPU DDP training '
