@@ -149,6 +149,15 @@ def _filter_compatible_state_dict(
     return filtered, skipped
 
 
+def _strip_module_prefix(
+    state: Dict[str, torch.Tensor]
+) -> Dict[str, torch.Tensor]:
+    return {
+        (k[len('module.'):] if k.startswith('module.') else k): v
+        for k, v in state.items()
+    }
+
+
 def average_checkpoints(
     device: torch.device,
     model: torch.nn.Module,
@@ -161,16 +170,23 @@ def average_checkpoints(
     epochs = parse_epochs(epochs)
     states_dict_list = []
     own_state = model.state_dict()
-    # Averaged via throwaway DataParallel copies of the raw underlying
-    # module, not copy.deepcopy(model) directly: when `model` is
-    # DistributedDataParallel-wrapped (see get_model), deepcopy drags along
-    # its process-group/reducer state, which is not deepcopy-safe.
-    # DataParallel and DistributedDataParallel both name their wrapped
-    # submodule `module`, so a DataParallel copy's state_dict() keys
-    # ("module.xxx") line up with checkpoints saved from either wrapper.
+    # Averaged via copy.deepcopy(base_module) on the raw underlying module
+    # (module.xxx-prefixed keys stripped/restored by hand), not
+    # copy.deepcopy(model) or a throwaway DataParallel(copy.deepcopy(...))
+    # wrapper:
+    #  - copy.deepcopy(model) is unsafe when `model` is
+    #    DistributedDataParallel-wrapped (see get_model): it drags along
+    #    its process-group/reducer state, which is not deepcopy-safe.
+    #  - torch.nn.DataParallel(module) is unsafe as a throwaway wrapper
+    #    too: whenever its device_ids end up length 1 (i.e. exactly one
+    #    CUDA device is visible -- true on any single-GPU machine,
+    #    regardless of whether this call targets that GPU or the CPU), its
+    #    constructor silently moves `module`'s parameters onto that GPU.
+    #    That would corrupt a CPU-targeted call (e.g. infer.py/
+    #    infer_single_file.py/eval_checkpoint.py commonly run with
+    #    --gpu 0) into silently returning a GPU-resident model.
     base_module = model.module if hasattr(model, 'module') else model
     for e in epochs:
-        copy_model = torch.nn.DataParallel(copy.deepcopy(base_module))
         checkpoint = torch.load(join(
             models_path,
             f"checkpoint_{e}.tar"), map_location=device)
@@ -185,18 +201,18 @@ def average_checkpoints(
                     "with the current model architecture for epoch %s "
                     "(kept randomly-initialized instead): %s",
                     len(skipped), e, skipped)
-            copy_model.load_state_dict(ckpt_state, strict=False)
-        else:
-            copy_model.load_state_dict(ckpt_state)
-        states_dict_list.append(copy_model.state_dict())
+        copy_module = copy.deepcopy(base_module)
+        copy_module.load_state_dict(
+            _strip_module_prefix(ckpt_state), strict=not allow_partial)
+        states_dict_list.append(copy_module.state_dict())
     avg_state_dict = average_states(states_dict_list, device)
-    avg_model = torch.nn.DataParallel(copy.deepcopy(base_module))
-    avg_model.load_state_dict(avg_state_dict)
+    avg_module = copy.deepcopy(base_module)
+    avg_module.load_state_dict(avg_state_dict)
     if device == torch.device('cpu'):
-        return avg_model.module
+        return avg_module
     if distributed:
-        return _wrap_ddp(avg_model.module, device, local_rank)
-    return avg_model
+        return _wrap_ddp(avg_module, device, local_rank)
+    return torch.nn.DataParallel(avg_module)
 
 
 def average_states(
