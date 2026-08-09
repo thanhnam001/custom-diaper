@@ -313,6 +313,9 @@ def get_loss(
     if args.spk_counting_loss_weight == 0:
         spk_counting_loss = 0
     else:
+        assert args.use_spk_counting_head, \
+            "--spk-counting-loss-weight > 0 requires --use-spk-counting-head " \
+            "true (the model was built without the head otherwise)."
         spk_counting_loss = get_speaker_counting_loss(
             model, attractors, n_speakers, args)
     if args.vad_loss_weight == 0:

@@ -701,16 +701,24 @@ class AttractorPerceiver(torch.nn.Module):
         # count via MSE on the sum of self.counter's per-attractor existence
         # probabilities (get_attractor_quantity_loss). Mean-pooling over the
         # attractor-slot axis makes this permutation-invariant, so it can be
-        # applied to the pre-PIT-permutation attractors directly. Always
-        # instantiated regardless of --spk-counting-loss-weight so warm-start
-        # checkpoints from before this head existed still load cleanly via
-        # --allow-partial-warmstart.
-        self.spk_counting_head = torch.nn.Sequential(
-            torch.nn.Linear(args.d_latents, args.d_latents, device=self.device),
-            torch.nn.ReLU(),
-            torch.nn.Linear(
-                args.d_latents, args.n_attractors + 1, device=self.device),
-        )
+        # applied to the pre-PIT-permutation attractors directly. Gated by
+        # --use-spk-counting-head (default False) rather than always built:
+        # an unconditional extra head would mean every checkpoint saved
+        # before this option existed no longer matches this model's
+        # state_dict, breaking strict-mode checkpoint loading (auto-resume,
+        # --init-model-path without --allow-partial-warmstart) for no
+        # benefit to runs that don't use it.
+        self.use_spk_counting_head = args.use_spk_counting_head
+        if self.use_spk_counting_head:
+            self.spk_counting_head = torch.nn.Sequential(
+                torch.nn.Linear(
+                    args.d_latents, args.d_latents, device=self.device),
+                torch.nn.ReLU(),
+                torch.nn.Linear(
+                    args.d_latents, args.n_attractors + 1, device=self.device),
+            )
+        else:
+            self.spk_counting_head = None
         self.detach_attractor_loss = args.detach_attractor_loss
         self.attractor_frame_comparison = args.attractor_frame_comparison
         if self.attractor_frame_comparison == 'xattention':
@@ -906,6 +914,9 @@ class AttractorPerceiver(torch.nn.Module):
         class logits over the number of active speakers, via mean-pooling
         across the attractor-slot axis (order-independent, so this can take
         either the raw or PIT-permuted attractor set)."""
+        assert self.spk_counting_head is not None, \
+            "get_speaker_counting_logits called but --use-spk-counting-head " \
+            "was not set when this model was constructed."
         return self.spk_counting_head(attractors.mean(dim=1))
 
     def get_attractors(

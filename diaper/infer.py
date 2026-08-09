@@ -542,6 +542,11 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--use-frame-selfattention', default=False, type=str2bool)
     parser.add_argument('--use-posenc', default=False, type=str2bool)
     parser.add_argument('--use-pre-crossattention', default=False, type=str2bool)
+    parser.add_argument('--use-spk-counting-head', default=False, type=str2bool,
+                        help='must match whatever the checkpoint being '
+                        'loaded was trained with (this is a model-'
+                        'architecture flag, not a loss-weight toggle) -- '
+                        'see train.py --use-spk-counting-head.')
     parser.add_argument('--vad-loss-weight', default=0.0, type=float)
     init_args = parser.parse_args()
     return init_args

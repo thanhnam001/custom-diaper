@@ -117,6 +117,7 @@ class InferenceArgs:
     use_frame_selfattention: bool
     use_posenc: bool
     use_pre_crossattention: bool
+    use_spk_counting_head: bool
     vad_loss_weight: float
     wav_dir: str
     wav_list: str
@@ -238,6 +239,11 @@ def parse_arguments() -> InferenceArgs:
     parser.add_argument('--use-frame-selfattention', default=False, type=str2bool)
     parser.add_argument('--use-posenc', default=False, type=str2bool)
     parser.add_argument('--use-pre-crossattention', default=False, type=str2bool)
+    parser.add_argument('--use-spk-counting-head', default=False, type=str2bool,
+                        help='must match whatever the checkpoint being '
+                        'loaded was trained with (this is a model-'
+                        'architecture flag, not a loss-weight toggle) -- '
+                        'see train.py --use-spk-counting-head.')
     parser.add_argument('--vad-loss-weight', default=0.0, type=float)
     parser.add_argument('--wav-dir', required=False, default='', type=str,
                         help='directory to search for wav files in '

@@ -535,13 +535,26 @@ def parse_arguments() -> SimpleNamespace:
                         type=str, choices=['dotprod', 'xattention'],
                         help='how are attractors and frame embeddings compared')
     parser.add_argument('--att-qty-loss-weight', default=0.0, type=float)
+    parser.add_argument('--use-spk-counting-head', default=False, type=str2bool,
+                        help='build model.spk_counting_head, a classification'
+                        ' head (softmax over 0..n_attractors speakers) that'
+                        ' mean-pools the attractor set -- an alternative to'
+                        ' --att-qty-loss-weight\'s MSE-on-summed-existence-'
+                        'probs regression. Off by default: this is a model-'
+                        'architecture flag (changes the state_dict), not just'
+                        ' a loss-weight toggle, so it must match between a'
+                        ' checkpoint and whatever loads it (train.py'
+                        ' auto-resume/--init-model-path, infer.py,'
+                        ' infer_single_file.py). Required (true) for'
+                        ' --spk-counting-loss-weight > 0 to work.')
     parser.add_argument('--spk-counting-loss-weight', default=0.0, type=float,
                         help='weighting parameter for the classification-'
-                        'based speaker-counting head (model.spk_counting_head):'
-                        ' cross-entropy over 0..n_attractors speakers from the'
-                        ' mean-pooled attractor set, trained alongside (not'
-                        ' instead of) --att-qty-loss-weight\'s MSE-on-summed-'
-                        'existence-probs regression -- see '
+                        'based speaker-counting head (model.spk_counting_head,'
+                        ' see --use-spk-counting-head): cross-entropy over'
+                        ' 0..n_attractors speakers from the mean-pooled'
+                        ' attractor set, trained alongside (not instead of)'
+                        ' --att-qty-loss-weight\'s MSE-on-summed-existence-'
+                        'probs regression -- see '
                         'losses.py::get_speaker_counting_loss. Off (0.0) by'
                         ' default so existing configs/checkpoints trained'
                         ' before this head existed are unaffected.')
