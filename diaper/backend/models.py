@@ -107,6 +107,28 @@ def _wrap_ddp(
     # untouched for a whole iteration make plain DDP error out during
     # backward, so this is kept on as a safety net across configs rather
     # than tracked per-option.
+    #
+    # KNOWN LIMITATION: --speakerid-loss (arcface/vanilla) computes part of
+    # the loss via model.module.get_speaker_logits(...), called directly on
+    # the wrapped module *after* model.forward() already returned --
+    # outside DDP's own forward() call, which is what
+    # find_unused_parameters=True's per-iteration "which params are
+    # reachable from forward()'s outputs" traversal inspects. That
+    # traversal can't see this later graph extension, wrongly marks
+    # get_speaker_logits' parameters as unused, and then desyncs DDP's
+    # reducer bucket bookkeeping once backward() genuinely produces
+    # gradients for them -- verified this hangs backward() forever under
+    # --gpu > 1 with --speakerid-loss set. static_graph=True fixes that
+    # narrow case but was verified (on real, varied training data) to
+    # break the default case instead, raising "Your training graph has
+    # changed in this iteration ... not compatible with static_graph" --
+    # likely from this training loop's own non-finite-loss skip (some
+    # iterations never call backward() at all) combined with real batches'
+    # varying attractor-match patterns. Not set here for that reason.
+    # --speakerid-loss therefore does not currently work under --gpu > 1;
+    # fixing it needs get_speaker_logits' computation moved inside
+    # AttractorPerceiver.forward() so DDP's own forward-pass tracking sees
+    # it, not a DistributedDataParallel construction flag.
     return DistributedDataParallel(
         module, device_ids=device_ids, output_device=output_device,
         find_unused_parameters=True)
