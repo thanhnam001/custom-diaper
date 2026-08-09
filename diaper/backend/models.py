@@ -17,6 +17,7 @@ from backend.updater import (
     setup_optimizer,
 )
 from pathlib import Path
+from torch.nn.parallel import DistributedDataParallel
 from transformers.models.perceiver.configuration_perceiver import PerceiverConfig
 from transformers.models.perceiver.modeling_perceiver import PerceiverEncoder
 from types import SimpleNamespace
@@ -92,12 +93,89 @@ def load_initmodel(args: SimpleNamespace):
     return load_checkpoint(args, args.initmodel)
 
 
+def _wrap_ddp(
+    module: torch.nn.Module,
+    device: torch.device,
+    local_rank: int,
+) -> torch.nn.Module:
+    device_ids = [local_rank] if device.type == 'cuda' else None
+    output_device = local_rank if device.type == 'cuda' else None
+    # find_unused_parameters=True: AttractorPerceiver has several auxiliary
+    # heads/paths that are unconditionally instantiated but only enter the
+    # forward/backward graph depending on config (e.g. a *-loss-weight of 0
+    # in args, see backend/losses.py::get_loss) -- any parameters that go
+    # untouched for a whole iteration make plain DDP error out during
+    # backward, so this is kept on as a safety net across configs rather
+    # than tracked per-option.
+    #
+    # KNOWN LIMITATION: --speakerid-loss (arcface/vanilla) computes part of
+    # the loss via model.module.get_speaker_logits(...), called directly on
+    # the wrapped module *after* model.forward() already returned --
+    # outside DDP's own forward() call, which is what
+    # find_unused_parameters=True's per-iteration "which params are
+    # reachable from forward()'s outputs" traversal inspects. That
+    # traversal can't see this later graph extension, wrongly marks
+    # get_speaker_logits' parameters as unused, and then desyncs DDP's
+    # reducer bucket bookkeeping once backward() genuinely produces
+    # gradients for them -- verified this hangs backward() forever under
+    # --gpu > 1 with --speakerid-loss set. static_graph=True fixes that
+    # narrow case but was verified (on real, varied training data) to
+    # break the default case instead, raising "Your training graph has
+    # changed in this iteration ... not compatible with static_graph" --
+    # likely from this training loop's own non-finite-loss skip (some
+    # iterations never call backward() at all) combined with real batches'
+    # varying attractor-match patterns. Not set here for that reason.
+    # --speakerid-loss therefore does not currently work under --gpu > 1;
+    # fixing it needs get_speaker_logits' computation moved inside
+    # AttractorPerceiver.forward() so DDP's own forward-pass tracking sees
+    # it, not a DistributedDataParallel construction flag.
+    return DistributedDataParallel(
+        module, device_ids=device_ids, output_device=output_device,
+        find_unused_parameters=True)
+
+
+class _CPUModelWrapper(torch.nn.Module):
+    """Transparent `.module`-holding stand-in for torch.nn.DataParallel,
+    used when the target device is CPU. DataParallel's constructor derives
+    its behavior from torch.cuda.is_available()/visible device count, not
+    from the caller's chosen device -- so on any machine where a CUDA
+    device happens to be visible, wrapping a CPU-targeted model in
+    DataParallel silently moves it onto that GPU (device_ids ends up
+    length 1) or leaves internal state pointing at cuda:0 that a later
+    model.to('cpu') can't fix (DataParallel.forward() checks parameter
+    device against a `src_device_obj` set once at construction and never
+    updated by .to()), breaking a CPU-targeted run either way. Code
+    elsewhere in this codebase assumes `model.module` always exists
+    (e.g. backend/losses.py::speaker_identification_loss) regardless of
+    wrapper type, and this class's state_dict() keys ("module.xxx") stay
+    compatible with checkpoints saved from a DataParallel/
+    DistributedDataParallel-wrapped model, so it's a drop-in replacement
+    for the CPU case only.
+    """
+
+    def __init__(self, module: torch.nn.Module) -> None:
+        super().__init__()
+        self.module = module
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+
 def get_model(args: SimpleNamespace) -> torch.nn.Module:
     args.in_size = args.feature_dim * (1 + 2 * args.context_size)
     if args.model_type == 'AttractorPerceiver':
         model = AttractorPerceiver(args)
     else:
         raise ValueError('Possible model_type is "AttractorPerceiver"')
+    if getattr(args, 'distributed', False):
+        # AttractorPerceiver already builds every submodule directly on
+        # args.device (see its __init__, which is passed args.device as
+        # self.device), so the module is already on the right GPU before
+        # wrapping -- no .to(device) needed here, unlike DataParallel below
+        # which scatters/gathers across devices per forward call instead.
+        return _wrap_ddp(model, args.device, getattr(args, 'local_rank', 0))
+    if args.device.type != 'cuda':
+        return _CPUModelWrapper(model)
     return torch.nn.DataParallel(model)
 
 
@@ -122,18 +200,44 @@ def _filter_compatible_state_dict(
     return filtered, skipped
 
 
+def _strip_module_prefix(
+    state: Dict[str, torch.Tensor]
+) -> Dict[str, torch.Tensor]:
+    return {
+        (k[len('module.'):] if k.startswith('module.') else k): v
+        for k, v in state.items()
+    }
+
+
 def average_checkpoints(
     device: torch.device,
     model: torch.nn.Module,
     models_path: str,
     epochs: str,
     allow_partial: bool = False,
+    distributed: bool = False,
+    local_rank: int = 0,
 ) -> torch.nn.Module:
     epochs = parse_epochs(epochs)
     states_dict_list = []
     own_state = model.state_dict()
+    # Averaged via copy.deepcopy(base_module) on the raw underlying module
+    # (module.xxx-prefixed keys stripped/restored by hand), not
+    # copy.deepcopy(model) or a throwaway DataParallel(copy.deepcopy(...))
+    # wrapper:
+    #  - copy.deepcopy(model) is unsafe when `model` is
+    #    DistributedDataParallel-wrapped (see get_model): it drags along
+    #    its process-group/reducer state, which is not deepcopy-safe.
+    #  - torch.nn.DataParallel(module) is unsafe as a throwaway wrapper
+    #    too: whenever its device_ids end up length 1 (i.e. exactly one
+    #    CUDA device is visible -- true on any single-GPU machine,
+    #    regardless of whether this call targets that GPU or the CPU), its
+    #    constructor silently moves `module`'s parameters onto that GPU.
+    #    That would corrupt a CPU-targeted call (e.g. infer.py/
+    #    infer_single_file.py/eval_checkpoint.py commonly run with
+    #    --gpu 0) into silently returning a GPU-resident model.
+    base_module = model.module if hasattr(model, 'module') else model
     for e in epochs:
-        copy_model = copy.deepcopy(model)
         checkpoint = torch.load(join(
             models_path,
             f"checkpoint_{e}.tar"), map_location=device)
@@ -148,16 +252,18 @@ def average_checkpoints(
                     "with the current model architecture for epoch %s "
                     "(kept randomly-initialized instead): %s",
                     len(skipped), e, skipped)
-            copy_model.load_state_dict(ckpt_state, strict=False)
-        else:
-            copy_model.load_state_dict(ckpt_state)
-        states_dict_list.append(copy_model.state_dict())
+        copy_module = copy.deepcopy(base_module)
+        copy_module.load_state_dict(
+            _strip_module_prefix(ckpt_state), strict=not allow_partial)
+        states_dict_list.append(copy_module.state_dict())
     avg_state_dict = average_states(states_dict_list, device)
-    avg_model = copy.deepcopy(model)
-    avg_model.load_state_dict(avg_state_dict)
+    avg_module = copy.deepcopy(base_module)
+    avg_module.load_state_dict(avg_state_dict)
     if device == torch.device('cpu'):
-        avg_model = avg_model.module
-    return avg_model
+        return avg_module
+    if distributed:
+        return _wrap_ddp(avg_module, device, local_rank)
+    return torch.nn.DataParallel(avg_module)
 
 
 def average_states(

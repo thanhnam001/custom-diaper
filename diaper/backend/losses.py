@@ -300,14 +300,18 @@ def get_loss(
     (activation_loss, activation_loss_DER,
         attractor_existence_loss, exists_mask, permutations) = pit_loss_multispk(
         logits_padded, ts_padded, attractors_logits, n_speakers, args)
+    # Every "off" branch below returns a zero-valued tensor (matching the
+    # attractor_diversity_loss_value convention in train.py), not a plain
+    # Python 0 -- compute_loss_and_metrics unconditionally calls .item()
+    # on all of these, which crashes with AttributeError on a plain int.
     if not (args.speakerid_loss == ''):
         spkid_loss = speaker_identification_loss(
             spkid_labels, spk_labels, model, attractors,
             total_n_speakers, permutations)
     else:
-        spkid_loss = 0
+        spkid_loss = torch.zeros((), device=attractors_logits.device)
     if args.att_qty_loss_weight == 0:
-        att_qty_loss = 0
+        att_qty_loss = torch.zeros((), device=attractors_logits.device)
     else:
         att_qty_loss = get_attractor_quantity_loss(attractors_logits, n_speakers)
     if args.spk_counting_loss_weight == 0:
@@ -319,11 +323,11 @@ def get_loss(
         spk_counting_loss = get_speaker_counting_loss(
             model, attractors, n_speakers, args)
     if args.vad_loss_weight == 0:
-        vad_loss_value = 0
+        vad_loss_value = torch.zeros((), device=attractors_logits.device)
     else:
         vad_loss_value = vad_loss(logits, target)
     if args.osd_loss_weight == 0:
-        osd_loss_value = 0
+        osd_loss_value = torch.zeros((), device=attractors_logits.device)
     else:
         osd_loss_value = osd_loss(logits, target)
 
@@ -358,15 +362,17 @@ def speaker_identification_loss(
         for valid_pos in torch.where(spk_labels_i == 1)[0]:
             selected_att.append(attractors[i, valid_pos])
             indices.append(masked_spk_labels[valid_pos])
+    if len(indices) == 0:
+        # torch.stack([]) below would raise ("stack expects a non-empty
+        # TensorList") before ever getting a chance to report "no valid
+        # speaker-ID positions this batch" -- check first instead.
+        return torch.zeros((), device=attractors.device)
     loss_function = torch.nn.CrossEntropyLoss()
     selected_att = torch.stack(selected_att)
     indices = torch.stack(indices)
-    if len(indices) > 0:
-        return loss_function(
-            model.module.get_speaker_logits(selected_att, indices),
-            indices) / indices.shape[0]
-    else:
-        return 0
+    return loss_function(
+        model.module.get_speaker_logits(selected_att, indices),
+        indices) / indices.shape[0]
 
 
 def get_attractor_quantity_loss(
