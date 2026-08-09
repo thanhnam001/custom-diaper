@@ -34,6 +34,10 @@ set -e
 # DIST_BACKEND defaults to nccl (training only ever runs on Linux GPU boxes
 # here); override to gloo if you ever need to run this on Windows or
 # another box without NCCL installed.
+# DIST_PORT overrides the loopback TCP rendezvous port (default 29500 in
+# diaper/train.py) -- only needed if you're running more than one DDP job
+# on the same machine at once and need them on different ports:
+#   CUDA_VISIBLE_DEVICES=2,3 NUM_GPUS=2 DIST_PORT=29501 ./scripts/run_pipeline_conformer_kernel31_mlp_fresh_2500h.sh
 # train_batchsize in each yaml is already a per-process (per-GPU) batch
 # size -- DistributedSampler shards the dataset across ranks, so going from
 # 1 to 2 GPUs doubles the effective global batch size at the same
@@ -49,6 +53,7 @@ CONFIG_DIR="models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 NUM_GPUS="${NUM_GPUS:-1}"
 DIST_BACKEND="${DIST_BACKEND:-nccl}"
+DIST_PORT="${DIST_PORT:-29500}"
 
 run_stage () {
     local name="$1"
@@ -56,10 +61,11 @@ run_stage () {
     echo "=================================================================="
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] starting stage: ${name}"
     echo "  config: ${config}"
-    echo "  gpu: ${NUM_GPUS} (dist-backend: ${DIST_BACKEND})"
+    echo "  gpu: ${NUM_GPUS} (dist-backend: ${DIST_BACKEND}, dist-port: ${DIST_PORT})"
     echo "=================================================================="
     python diaper/train.py -c "${config}" \
-        --gpu "${NUM_GPUS}" --dist-backend "${DIST_BACKEND}"
+        --gpu "${NUM_GPUS}" --dist-backend "${DIST_BACKEND}" \
+        --dist-port "${DIST_PORT}"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] finished stage: ${name}"
 }
 
