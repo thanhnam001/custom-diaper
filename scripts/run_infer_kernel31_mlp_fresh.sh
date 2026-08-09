@@ -9,33 +9,32 @@ set -e
 #   - RAMC finetune,    pipeline 2 (mlp only):         infer_ramc_mlp.yaml
 #   - RAMC finetune,    pipeline 1 (mlp+unmaskeddiv):  infer_ramc_mlp_unmaskeddiv.yaml
 #
-# Those 4 configs carry server-only absolute paths (infer_data_dir/
-# models_path/rttms_dir, written against the training server's filesystem)
-# and no `epochs` (no checkpoints existed locally when they were created --
-# see each config's header comment). This script overrides all of that on
-# the command line:
-#   - infer_data_dir  -> database/msdwild|ramc/kaldi/test (this machine's
-#     local copy, see CLAUDE.md's "Local data layout")
-#   - models_path/rttms_dir -> the config's own server path with the
-#     /data/ocr/namvt17/custom-diaper/ prefix swapped for this repo root,
-#     matching how the mirrored experiments/ tree is laid out locally (same
-#     convention as scripts/rerun_infer_msdwild.sh)
-#   - epochs -> auto-detected from whatever checkpoint_<N>.tar files exist
-#     under the local models_path, averaging the last
-#     $MAX_CHECKPOINTS_TO_AVERAGE of them ("N-1 to M" parse_epochs syntax,
-#     see diaper/backend/models.py::parse_epochs). There's no dev-DER curve
-#     to hand-pick a range from yet, so this is a reasonable default -- redo
-#     the run with an explicit `--epochs` once TensorBoard shows a better
-#     range.
+# For SERVER use: those 4 configs' infer_data_dir/models_path/rttms_dir are
+# already correct absolute paths on the training server's filesystem (see
+# each config's header comment), so this script reads and uses them as-is
+# -- no path rewriting, unlike scripts/rerun_infer_msdwild.sh which
+# translates server paths to a local mirror for running off-server. Only
+# `epochs` is filled in here (omitted from the configs since no checkpoints
+# existed anywhere when they were written): this script auto-detects it
+# from whatever checkpoint_<N>.tar files exist under each config's
+# models_path, averaging the last $MAX_CHECKPOINTS_TO_AVERAGE of them
+# ("N-1 to M" parse_epochs syntax, see diaper/backend/models.py::parse_epochs).
+# There's no dev-DER curve to hand-pick a better range from yet -- redo the
+# run with an explicit `--epochs` once TensorBoard shows one.
 #
-# A config is skipped if its local models_path has no checkpoints yet
-# (nothing synced from the server for that pipeline/dataset combination).
+# A config is skipped if its models_path has no checkpoints yet (that
+# finetune stage hasn't reached a checkpoint on this run).
 #
-# Uses this machine's local diaper/dscore envs and checkouts per CLAUDE.md's
-# "Environment" / "Evaluation" sections (NOT the server-only env paths
-# scripts/rerun_infer_msdwild.sh hardcodes).
+# Reference RTTM for scoring is derived from each config's own
+# infer_data_dir (Kaldi data dirs bundle their own `rttm` file, e.g.
+# .../msdwild/kaldi/test/rttm) rather than a separately-tracked path.
 #
-# Run from the repo root:
+# Uses the SERVER's diaper/dscore envs and checkouts (same values as
+# scripts/rerun_infer_msdwild.sh) -- NOT this repo's local
+# ../Master/repos/DiaPer/.diaper_env / ../Master/repos/dscore paths, which
+# only exist on the Windows dev machine.
+#
+# Run from the repo root, on the server:
 #   ./scripts/run_infer_kernel31_mlp_fresh.sh
 
 # Respects an already-set CUDA_VISIBLE_DEVICES from the calling shell,
@@ -46,40 +45,39 @@ set -e
 # inherits it since it's exported here before that subprocess starts.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-DIAPER_ENV="../Master/repos/DiaPer/.diaper_env"
-DSCORE_ENV_NAME="dscore"
-DSCORE_SRC="../Master/repos/dscore"
+DIAPER_ENV="/data/ocr/namvt17/custom-diaper/.venv"
+DSCORE_SRC="/data/ocr/namvt17/custom-diaper/dscore"
+DSCORE_ENV="/data/ocr/namvt17/custom-diaper/dscore/.dscore"
 
-SERVER_PREFIX="/data/ocr/namvt17/custom-diaper/"
 MAX_CHECKPOINTS_TO_AVERAGE=10
 
 CONFIG_DIR="models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh"
 
-# name|config|local infer_data_dir|reference rttm|dscore collar (empty = no --collar flag, i.e. 0s)
+# name|config|dscore collar (empty = no --collar flag, i.e. 0s)
 RUNS=(
-    "msdwild_mlp|${CONFIG_DIR}/infer_msdwild_mlp.yaml|database/msdwild/kaldi/test|database/msdwild/kaldi/test/rttm|0.25"
-    "msdwild_mlp_unmaskeddiv|${CONFIG_DIR}/infer_msdwild_mlp_unmaskeddiv.yaml|database/msdwild/kaldi/test|database/msdwild/kaldi/test/rttm|0.25"
-    "ramc_mlp|${CONFIG_DIR}/infer_ramc_mlp.yaml|database/ramc/kaldi/test|database/ramc/kaldi/test/rttm|"
-    "ramc_mlp_unmaskeddiv|${CONFIG_DIR}/infer_ramc_mlp_unmaskeddiv.yaml|database/ramc/kaldi/test|database/ramc/kaldi/test/rttm|"
+    "msdwild_mlp|${CONFIG_DIR}/infer_msdwild_mlp.yaml|0.25"
+    "msdwild_mlp_unmaskeddiv|${CONFIG_DIR}/infer_msdwild_mlp_unmaskeddiv.yaml|0.25"
+    "ramc_mlp|${CONFIG_DIR}/infer_ramc_mlp.yaml|"
+    "ramc_mlp_unmaskeddiv|${CONFIG_DIR}/infer_ramc_mlp_unmaskeddiv.yaml|"
 )
 
 for run in "${RUNS[@]}"; do
-    IFS='|' read -r name cfg local_data ref_rttm collar <<< "$run"
+    IFS='|' read -r name cfg collar <<< "$run"
 
-    server_models_path=$(grep "^models_path:" "$cfg" | sed 's/^models_path: *//')
-    server_rttms_dir=$(grep "^rttms_dir:" "$cfg" | sed 's/^rttms_dir: *//')
-    local_models_path="${server_models_path#$SERVER_PREFIX}"
-    local_rttms_dir="${server_rttms_dir#$SERVER_PREFIX}"
+    models_path=$(grep "^models_path:" "$cfg" | sed 's/^models_path: *//')
+    rttms_dir=$(grep "^rttms_dir:" "$cfg" | sed 's/^rttms_dir: *//')
+    infer_data_dir=$(grep "^infer_data_dir:" "$cfg" | sed 's/^infer_data_dir: *//')
+    ref_rttm="${infer_data_dir}/rttm"
 
-    if [ ! -d "$local_models_path" ]; then
-        echo "SKIPPING $name ($cfg) -- no local checkpoints found at $local_models_path"
+    if [ ! -d "$models_path" ]; then
+        echo "SKIPPING $name ($cfg) -- no checkpoints found at $models_path"
         continue
     fi
 
-    mapfile -t ckpt_epochs < <(find "$local_models_path" -maxdepth 1 -name 'checkpoint_*.tar' \
+    mapfile -t ckpt_epochs < <(find "$models_path" -maxdepth 1 -name 'checkpoint_*.tar' \
         -exec basename {} \; | sed -E 's/checkpoint_([0-9]+)\.tar/\1/' | sort -n)
     if [ "${#ckpt_epochs[@]}" -eq 0 ]; then
-        echo "SKIPPING $name ($cfg) -- $local_models_path exists but has no checkpoint_*.tar files"
+        echo "SKIPPING $name ($cfg) -- $models_path exists but has no checkpoint_*.tar files"
         continue
     fi
 
@@ -93,25 +91,23 @@ for run in "${RUNS[@]}"; do
 
     echo "=================================================================="
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] running: $name ($cfg)"
-    echo "  models_path: $local_models_path"
-    echo "  rttms_dir:   $local_rttms_dir"
-    echo "  epochs:      $epochs_range (averaging ${#ckpt_epochs[@]} available checkpoint(s), capped at $MAX_CHECKPOINTS_TO_AVERAGE)"
+    echo "  infer_data_dir: $infer_data_dir"
+    echo "  models_path:    $models_path"
+    echo "  rttms_dir:      $rttms_dir"
+    echo "  epochs:         $epochs_range (averaging ${#ckpt_epochs[@]} available checkpoint(s), capped at $MAX_CHECKPOINTS_TO_AVERAGE)"
     echo "=================================================================="
 
     conda run -p "$DIAPER_ENV" --no-capture-output python diaper/infer.py \
         -c "$cfg" \
-        --infer-data-dir "$local_data" \
-        --models-path "$local_models_path" \
-        --rttms-dir "$local_rttms_dir" \
         --epochs "$epochs_range" \
         --num-threads 4
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] finished inference: $name"
 
     median_window_length=$(grep '^median_window_length:' "$cfg" | sed 's/^median_window_length: *//')
-    mapfile -t sys_rttms < <(find "$local_rttms_dir" -path "*/median${median_window_length}/*.rttm" -type f)
+    mapfile -t sys_rttms < <(find "$rttms_dir" -path "*/median${median_window_length}/*.rttm" -type f)
     if [ "${#sys_rttms[@]}" -eq 0 ]; then
-        echo "  WARNING: no .rttm files found under $local_rttms_dir (median${median_window_length}), skipping scoring"
+        echo "  WARNING: no .rttm files found under $rttms_dir (median${median_window_length}), skipping scoring"
         continue
     fi
 
@@ -122,10 +118,10 @@ for run in "${RUNS[@]}"; do
         collar_label="$collar"
     fi
 
-    score_log="${local_rttms_dir}/dscore_collar${collar_label}.log"
+    score_log="${rttms_dir}/dscore_collar${collar_label}.log"
     echo "  scoring ${#sys_rttms[@]} RTTM(s) against $ref_rttm (collar ${collar_label}s)"
 
-    conda run -n "$DSCORE_ENV_NAME" --no-capture-output python -u "$DSCORE_SRC/score.py" \
+    conda run -p "$DSCORE_ENV" --no-capture-output python -u "$DSCORE_SRC/score.py" \
         "${collar_args[@]}" \
         -r "$ref_rttm" \
         -s "${sys_rttms[@]}" \
