@@ -28,6 +28,7 @@ from backend.models import (
     average_checkpoints,
     get_model,
 )
+from common_utils.arg_types import str2bool
 from common_utils.diarization_dataset import KaldiDiarizationDataset
 from common_utils.metrics import calculate_metrics
 from os.path import join
@@ -402,7 +403,7 @@ def parse_arguments() -> SimpleNamespace:
                         action=yamlargparse.ActionConfigFile)
     parser.add_argument('--attractor-existence-loss-weight', default=1.0, type=float,
                         help='weighting parameter')
-    parser.add_argument('--compute-metrics', default=False, type=bool,
+    parser.add_argument('--compute-metrics', default=False, type=str2bool,
                         help='compute whole-file frame-level diarization '
                         'metrics (DER/miss/FA/confusion, VAD/OSD error '
                         'rates, attractor existence accuracy) per '
@@ -438,7 +439,7 @@ def parse_arguments() -> SimpleNamespace:
                         help='how to compare attractors and frame embeddings')
     parser.add_argument('--att-qty-loss-weight', default=0.0, type=float)
     parser.add_argument('--att-qty-reg-loss-weight', default=0.0, type=float)
-    parser.add_argument('--condition-frame-encoder', type=bool, default=True)
+    parser.add_argument('--condition-frame-encoder', type=str2bool, default=True)
     parser.add_argument('--conformer-conv-kernel-size', default=3, type=int,
                         help='depthwise-conv kernel size for the conformer '
                         'frame encoder (must be odd)')
@@ -447,11 +448,11 @@ def parse_arguments() -> SimpleNamespace:
                         help='normalization used inside the conformer '
                         'frame encoder\'s ConvolutionModule; must match '
                         'the value the model was trained with')
-    parser.add_argument('--context-activations', type=bool, default=False)
+    parser.add_argument('--context-activations', type=str2bool, default=False)
     parser.add_argument('--context-size', type=int)
     parser.add_argument('--d-latents', type=int,
                         help='dimension of attractors')
-    parser.add_argument('--detach-attractor-loss', default=False, type=bool,
+    parser.add_argument('--detach-attractor-loss', default=False, type=str2bool,
                         help='If True, avoid backpropagation on attractor loss')
     parser.add_argument('--dropout_attractors', type=float,
                         help='attention dropout for attractors path')
@@ -473,7 +474,7 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--gpu', '-g', default=-1, type=int,
                         help='GPU ID (negative value indicates CPU)')
-    parser.add_argument('--fallback-cpu-oom', default=False, type=bool,
+    parser.add_argument('--fallback-cpu-oom', default=False, type=str2bool,
                         help='if a GPU forward pass raises a CUDA '
                         'out-of-memory error (typically on unusually long '
                         'recordings), retry that single recording on CPU '
@@ -486,7 +487,7 @@ def parse_arguments() -> SimpleNamespace:
                                  'logmel_meanvarnorm'],
                         help='input normalization transform')
     parser.add_argument('--latents2attractors', type=str, default='linear')
-    parser.add_argument('--length-normalize', default=False, type=bool)
+    parser.add_argument('--length-normalize', default=False, type=str2bool)
     parser.add_argument('--log-report-batches-num', default=1, type=float)
     parser.add_argument('--median-window-length', default=11, type=int)
     parser.add_argument('--model-type', default='AttractorsPath',
@@ -508,7 +509,7 @@ def parse_arguments() -> SimpleNamespace:
                         help='number of self-attention heads per layer')
     parser.add_argument('--n-xa-heads-attractors', type=int,
                         help='number of cross-attention heads per layer')
-    parser.add_argument('--normalize-probs', default=False, type=bool)
+    parser.add_argument('--normalize-probs', default=False, type=str2bool)
     parser.add_argument('--num-frames', default=-1, type=int,
                         help='number of frames in one utterance')
     parser.add_argument('--num-speakers', type=int)
@@ -518,7 +519,7 @@ def parse_arguments() -> SimpleNamespace:
                         'mel-filterbank matmul in librosa otherwise fans '
                         'out across every core via OpenBLAS/MKL. '
                         '-1 leaves the library default (all cores) in place.')
-    parser.add_argument('--plot-output', default=False, type=bool)
+    parser.add_argument('--plot-output', default=False, type=str2bool)
     parser.add_argument('--posenc-maxlen', type=int, default=36000,
                         help="The maximum length allowed for the positional \
                         encoding. i.e. 36000 with 0.1s frames is 1 hour")
@@ -533,14 +534,14 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--speakerid-loss', type=str, default='',
                         choices=['arcface', 'vanilla'])
     parser.add_argument('--speakerid-num-speakers', type=int, default=-1)
-    parser.add_argument('--specaugment', type=bool, default=False)
+    parser.add_argument('--specaugment', type=str2bool, default=False)
     parser.add_argument('--subsampling', type=int)
     parser.add_argument('--threshold', default=0.5, type=float)
     parser.add_argument('--time-shuffle', action='store_true',
                         help='Shuffle time-axis order before input to the network')
-    parser.add_argument('--use-frame-selfattention', default=False, type=bool)
-    parser.add_argument('--use-posenc', default=False, type=bool)
-    parser.add_argument('--use-pre-crossattention', default=False, type=bool)
+    parser.add_argument('--use-frame-selfattention', default=False, type=str2bool)
+    parser.add_argument('--use-posenc', default=False, type=str2bool)
+    parser.add_argument('--use-pre-crossattention', default=False, type=str2bool)
     parser.add_argument('--vad-loss-weight', default=0.0, type=float)
     init_args = parser.parse_args()
     return init_args
@@ -592,8 +593,13 @@ if __name__ == '__main__':
 
     model = get_model(args)
 
+    # allow_partial=True: tolerates checkpoints saved before spk_counting_head
+    # existed (e.g. every pretrained checkpoint under models/). That head's
+    # output is only ever read by losses.py::get_loss (training), never by
+    # anything in this inference path, so leaving it randomly-initialized
+    # here has no effect on the produced RTTMs.
     model = average_checkpoints(
-        args.device, model, args.models_path, args.epochs)
+        args.device, model, args.models_path, args.epochs, allow_partial=True)
     model = model.to(args.device)
     model.eval()
 

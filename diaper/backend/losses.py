@@ -310,6 +310,11 @@ def get_loss(
         att_qty_loss = 0
     else:
         att_qty_loss = get_attractor_quantity_loss(attractors_logits, n_speakers)
+    if args.spk_counting_loss_weight == 0:
+        spk_counting_loss = 0
+    else:
+        spk_counting_loss = get_speaker_counting_loss(
+            model, attractors, n_speakers, args)
     if args.vad_loss_weight == 0:
         vad_loss_value = 0
     else:
@@ -324,6 +329,7 @@ def get_loss(
         activation_loss_DER,
         attractor_existence_loss,
         att_qty_loss,
+        spk_counting_loss,
         vad_loss_value,
         osd_loss_value,
         spkid_loss,
@@ -370,6 +376,26 @@ def get_attractor_quantity_loss(
         torch.from_numpy(n_speakers).to(attractors_logits.device).double()
     )
     return attractor_loss
+
+
+def get_speaker_counting_loss(
+    model: torch.nn.Module,
+    attractors: torch.Tensor,
+    n_speakers: List[int],
+    args: SimpleNamespace
+) -> torch.Tensor:
+    """Classification alternative to get_attractor_quantity_loss: instead of
+    regressing a count via MSE on the sum of the existence head's (self.counter)
+    per-attractor probabilities, a separate head (self.spk_counting_head)
+    mean-pools the attractor set and predicts a categorical distribution over
+    0..n_attractors speakers, trained with cross-entropy. Ground-truth counts
+    above n_attractors are clipped -- the model has no attractor slot to
+    represent them anyway."""
+    qty_logits = model.module.get_speaker_counting_logits(attractors)
+    targets = torch.tensor(
+        [min(n, qty_logits.shape[1] - 1) for n in n_speakers],
+        device=qty_logits.device, dtype=torch.long)
+    return F.cross_entropy(qty_logits, targets)
 
 
 def attractor_diversity_loss(vectors: torch.Tensor) -> torch.Tensor:

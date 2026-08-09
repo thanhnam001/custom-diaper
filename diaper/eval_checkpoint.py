@@ -126,8 +126,13 @@ if __name__ == '__main__':
         "--init-model-path/--init-epochs"
 
     model = get_model(args)
+    # allow_partial=True: tolerates checkpoints saved before spk_counting_head
+    # existed. If --spk-counting-loss-weight > 0 is also passed, this script
+    # will report a meaningless (randomly-initialized) spk_counting_loss for
+    # such checkpoints -- expected, since that head was never trained on them.
     model = average_checkpoints(
-        args.device, model, args.init_model_path, args.init_epochs)
+        args.device, model, args.init_model_path, args.init_epochs,
+        allow_partial=True)
     model = model.to(args.device)
     model.eval()
 

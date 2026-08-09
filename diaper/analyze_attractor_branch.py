@@ -50,8 +50,11 @@ if __name__ == '__main__':
     args.device = torch.device("cuda") if args.gpu >= 1 else torch.device("cpu")
 
     model = get_model(args)
+    # allow_partial=True: tolerates checkpoints saved before spk_counting_head
+    # existed -- this script never reads that head's output.
     model = average_checkpoints(
-        args.device, model, args.init_model_path, args.init_epochs)
+        args.device, model, args.init_model_path, args.init_epochs,
+        allow_partial=True)
     model = model.to(args.device)
     model.eval()
 

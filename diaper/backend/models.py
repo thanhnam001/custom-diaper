@@ -695,6 +695,22 @@ class AttractorPerceiver(torch.nn.Module):
             self.latents2attractors = Dummy(device=self.device)
         # does not need to be d_latents, just a reasonable dimension
         self.counter = torch.nn.Linear(args.d_latents, 1, device=self.device)
+        # Speaker-counting head: classifies the number of active speakers
+        # (0..n_attractors, n_attractors+1 classes) from the mean-pooled
+        # attractor set via softmax/cross-entropy, instead of regressing a
+        # count via MSE on the sum of self.counter's per-attractor existence
+        # probabilities (get_attractor_quantity_loss). Mean-pooling over the
+        # attractor-slot axis makes this permutation-invariant, so it can be
+        # applied to the pre-PIT-permutation attractors directly. Always
+        # instantiated regardless of --spk-counting-loss-weight so warm-start
+        # checkpoints from before this head existed still load cleanly via
+        # --allow-partial-warmstart.
+        self.spk_counting_head = torch.nn.Sequential(
+            torch.nn.Linear(args.d_latents, args.d_latents, device=self.device),
+            torch.nn.ReLU(),
+            torch.nn.Linear(
+                args.d_latents, args.n_attractors + 1, device=self.device),
+        )
         self.detach_attractor_loss = args.detach_attractor_loss
         self.attractor_frame_comparison = args.attractor_frame_comparison
         if self.attractor_frame_comparison == 'xattention':
@@ -883,6 +899,15 @@ class AttractorPerceiver(torch.nn.Module):
         else:
             return self.speaker_layer(attractors, spkid_labels)
 
+    def get_speaker_counting_logits(
+        self, attractors: torch.Tensor
+    ) -> torch.Tensor:
+        """attractors: (B, n_attractors, d_latents) -> (B, n_attractors+1)
+        class logits over the number of active speakers, via mean-pooling
+        across the attractor-slot axis (order-independent, so this can take
+        either the raw or PIT-permuted attractor set)."""
+        return self.spk_counting_head(attractors.mean(dim=1))
+
     def get_attractors(
         self,
         frame_embs: torch.Tensor
@@ -964,13 +989,14 @@ class AttractorPerceiver(torch.nn.Module):
             frame_encoder_modules += [self.W]
         modules = [self.pre_crossattention, self.pos_encoder,
                    self.latent_attractors, self.encoder_attractors,
-                   self.latents2attractors, self.counter, self.frame_activate,
+                   self.latents2attractors, self.counter,
+                   self.spk_counting_head, self.frame_activate,
                    self.speaker_layer, self.contextualizer_lstm,
                    self.contextualizer_linear]
         names = ['pre_crossattention', 'pos_encoder', 'latent_attractors',
                  'encoder_attractors', 'latents2attractors', 'counter',
-                 'frame_activate', 'speaker_layer', 'contextualizer_lstm',
-                 'contextualizer_linear']
+                 'spk_counting_head', 'frame_activate', 'speaker_layer',
+                 'contextualizer_lstm', 'contextualizer_linear']
         for i in range(len(names)):
             if not (modules[i] is None):
                 params = 0

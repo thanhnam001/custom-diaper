@@ -5,6 +5,7 @@
 # Licensed under the MIT license.
 
 
+from common_utils.arg_types import str2bool
 from common_utils.diarization_dataset import KaldiDiarizationDataset
 from copy import deepcopy
 from torch.utils.data import DataLoader
@@ -128,10 +129,10 @@ def parse_arguments() -> SimpleNamespace:
                         help='number of workers in train DataLoader')
     parser.add_argument('--features-output-path', type=str)
     parser.add_argument('--sampling-rate', type=int)
-    parser.add_argument('--specaugment', type=bool, default=False)
+    parser.add_argument('--specaugment', type=str2bool, default=False)
     parser.add_argument('--seed', type=int)
     parser.add_argument('--subsampling', type=int)
-    parser.add_argument('--use-last-samples', default=True, type=bool)
+    parser.add_argument('--use-last-samples', default=True, type=str2bool)
     parser.add_argument('--time-shuffle', action='store_true',
                         help='Shuffle time-axis order before input to the network')
     parser.add_argument('--train-data-dir',

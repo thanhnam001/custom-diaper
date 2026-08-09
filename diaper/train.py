@@ -38,6 +38,7 @@ from backend.models import (
     save_checkpoint,
 )
 from backend.updater import compute_noam_params, setup_optimizer, get_rate
+from common_utils.arg_types import str2bool
 from common_utils.diarization_dataset import (
     KaldiDiarizationDataset,
     PrecomputedDiarizationDataset)
@@ -138,6 +139,7 @@ def compute_loss_and_metrics(
         activation_loss_DER,
         attractor_existence_loss,
         att_qty_loss,
+        spk_counting_loss,
         vad_loss,
         osd_loss,
         spkid_loss,
@@ -194,6 +196,7 @@ def compute_loss_and_metrics(
         intermediate_activation_losses_DER = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
         intermediate_attractor_existence_losses = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
         intermediate_att_qty_losses = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
+        intermediate_spk_counting_losses = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
         intermediate_vad_losses = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
         intermediate_osd_losses = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
         intermediate_spkid_losses = torch.zeros(per_frameenclayer_ys_logits.shape[-1] - 1)
@@ -204,6 +207,7 @@ def compute_loss_and_metrics(
                 activation_loss_DER_j,
                 attractor_existence_loss_j,
                 att_qty_loss_j,
+                spk_counting_loss_j,
                 vad_loss_j,
                 osd_loss_j,
                 spkid_loss_j,
@@ -223,6 +227,7 @@ def compute_loss_and_metrics(
             intermediate_activation_losses_DER[j] = activation_loss_DER_j
             intermediate_attractor_existence_losses[j] = attractor_existence_loss_j
             intermediate_att_qty_losses[j] = att_qty_loss_j
+            intermediate_spk_counting_losses[j] = spk_counting_loss_j
             intermediate_vad_losses[j] = vad_loss_j
             intermediate_osd_losses[j] = osd_loss_j
             intermediate_spkid_losses[j] = spkid_loss_j
@@ -230,6 +235,7 @@ def compute_loss_and_metrics(
         activation_loss_DER += torch.mean(intermediate_activation_losses_DER)
         attractor_existence_loss += torch.mean(intermediate_attractor_existence_losses)
         att_qty_loss += torch.mean(intermediate_att_qty_losses)
+        spk_counting_loss += torch.mean(intermediate_spk_counting_losses)
         vad_loss += torch.mean(intermediate_vad_losses)
         osd_loss += torch.mean(intermediate_osd_losses)
         spkid_loss += torch.mean(intermediate_spkid_losses)
@@ -239,6 +245,7 @@ def compute_loss_and_metrics(
         intermediate_activation_losses_DER = torch.zeros(per_prcvblock_ys_logits.shape[-1] - 1)
         intermediate_attractor_existence_losses = torch.zeros(per_prcvblock_ys_logits.shape[-1] - 1)
         intermediate_att_qty_losses = torch.zeros(per_prcvblock_ys_logits.shape[-1] - 1)
+        intermediate_spk_counting_losses = torch.zeros(per_prcvblock_ys_logits.shape[-1] - 1)
         intermediate_vad_losses = torch.zeros(per_prcvblock_ys_logits.shape[-1] - 1)
         intermediate_osd_losses = torch.zeros(per_prcvblock_ys_logits.shape[-1] - 1)
         intermediate_spkid_losses = torch.zeros(per_prcvblock_ys_logits.shape[-1] - 1)
@@ -249,6 +256,7 @@ def compute_loss_and_metrics(
                 activation_loss_DER_i,
                 attractor_existence_loss_i,
                 att_qty_loss_i,
+                spk_counting_loss_i,
                 vad_loss_i,
                 osd_loss_i,
                 spkid_loss_i,
@@ -268,6 +276,7 @@ def compute_loss_and_metrics(
             intermediate_activation_losses_DER[i] = activation_loss_DER_i
             intermediate_attractor_existence_losses[i] = attractor_existence_loss_i
             intermediate_att_qty_losses[i] = att_qty_loss_i
+            intermediate_spk_counting_losses[i] = spk_counting_loss_i
             intermediate_vad_losses[i] = vad_loss_i
             intermediate_osd_losses[i] = osd_loss_i
             intermediate_spkid_losses[i] = spkid_loss_i
@@ -276,6 +285,7 @@ def compute_loss_and_metrics(
         activation_loss_DER += torch.mean(intermediate_activation_losses_DER)
         attractor_existence_loss += torch.mean(intermediate_attractor_existence_losses)
         att_qty_loss += torch.mean(intermediate_att_qty_losses)
+        spk_counting_loss += torch.mean(intermediate_spk_counting_losses)
         vad_loss += torch.mean(intermediate_vad_losses)
         osd_loss += torch.mean(intermediate_osd_losses)
         spkid_loss += torch.mean(intermediate_spkid_losses)
@@ -285,6 +295,7 @@ def compute_loss_and_metrics(
         activation_loss_DER * args.activation_loss_DER_weight + \
         attractor_existence_loss * args.attractor_existence_loss_weight + \
         att_qty_loss * args.att_qty_loss_weight + \
+        spk_counting_loss * args.spk_counting_loss_weight + \
         vad_loss * args.vad_loss_weight + \
         osd_loss * args.osd_loss_weight + \
         spkid_loss * args.speakerid_loss_weight + \
@@ -338,6 +349,7 @@ def compute_loss_and_metrics(
     acum_metrics['activation_loss_DER'] += activation_loss_DER.item()
     acum_metrics['attractor_existence_loss'] += attractor_existence_loss.item()
     acum_metrics['att_qty_loss'] += att_qty_loss.item()
+    acum_metrics['spk_counting_loss'] += spk_counting_loss.item()
     acum_metrics['vad_loss'] += vad_loss.item()
     acum_metrics['osd_loss'] += osd_loss.item()
     acum_metrics['spkid_loss'] += spkid_loss.item()
@@ -523,6 +535,16 @@ def parse_arguments() -> SimpleNamespace:
                         type=str, choices=['dotprod', 'xattention'],
                         help='how are attractors and frame embeddings compared')
     parser.add_argument('--att-qty-loss-weight', default=0.0, type=float)
+    parser.add_argument('--spk-counting-loss-weight', default=0.0, type=float,
+                        help='weighting parameter for the classification-'
+                        'based speaker-counting head (model.spk_counting_head):'
+                        ' cross-entropy over 0..n_attractors speakers from the'
+                        ' mean-pooled attractor set, trained alongside (not'
+                        ' instead of) --att-qty-loss-weight\'s MSE-on-summed-'
+                        'existence-probs regression -- see '
+                        'losses.py::get_speaker_counting_loss. Off (0.0) by'
+                        ' default so existing configs/checkpoints trained'
+                        ' before this head existed are unaffected.')
     parser.add_argument('--attractor-diversity-loss-weight', default=0.0,
                         type=float, help='weighting parameter for '
                         'masked_attractor_diversity_loss, the existence-'
@@ -551,7 +573,7 @@ def parse_arguments() -> SimpleNamespace:
                         'watch attractor_diversity_unmasked_loss on '
                         'TensorBoard relative to activation_loss_BCE/'
                         'attractor_existence_loss. See backend/losses.py.')
-    parser.add_argument('--condition-frame-encoder', type=bool, default=True)
+    parser.add_argument('--condition-frame-encoder', type=str2bool, default=True)
     parser.add_argument('--conformer-conv-kernel-size', default=3, type=int,
                         help='depthwise-conv kernel size for the conformer '
                         'frame encoder (must be odd)')
@@ -562,11 +584,11 @@ def parse_arguments() -> SimpleNamespace:
                         'depthwise conv (only takes effect when '
                         '--frame-encoder-type=conformer); see '
                         'backend/models.py::ConvolutionModule')
-    parser.add_argument('--context-activations', type=bool, default=False)
+    parser.add_argument('--context-activations', type=str2bool, default=False)
     parser.add_argument('--context-size', type=int)
     parser.add_argument('--d-latents', type=int, default=None,
                         help='dimension of latents')
-    parser.add_argument('--detach-attractor-loss', type=bool,
+    parser.add_argument('--detach-attractor-loss', type=str2bool,
                         help='If True, avoid backpropagation on attractor loss')
     parser.add_argument('--dev-batchsize', default=1, type=int,
                         help='number of utterances in one development batch')
@@ -576,7 +598,7 @@ def parse_arguments() -> SimpleNamespace:
                         help='attention dropout for attractors path')
     parser.add_argument('--dropout_frames', type=float,
                         help='attention dropout for frame embeddings path')
-    parser.add_argument('--early-stopping', default=False, type=bool,
+    parser.add_argument('--early-stopping', default=False, type=str2bool,
                         help='enable early stopping on dev DER; intended '
                         'for finetuning runs, since --init-model-path is '
                         'also used for adaptation runs meant to always run '
@@ -620,9 +642,9 @@ def parse_arguments() -> SimpleNamespace:
                         '(covers both epoch-boundary and '
                         '--save-intermediate checkpoints). <= 0 disables '
                         'pruning and keeps every checkpoint.')
-    parser.add_argument('--intermediate-loss-frameencoder', default=False, type=bool)
-    parser.add_argument('--intermediate-loss-perceiver', default=False, type=bool)
-    parser.add_argument('--length-normalize', default=False, type=bool)
+    parser.add_argument('--intermediate-loss-frameencoder', default=False, type=str2bool)
+    parser.add_argument('--intermediate-loss-perceiver', default=False, type=str2bool)
+    parser.add_argument('--length-normalize', default=False, type=str2bool)
     parser.add_argument('--log-report-batches-num', default=1, type=float)
     parser.add_argument('--lr', type=float)
     parser.add_argument('--latents2attractors', type=str, default='dummy',
@@ -633,7 +655,7 @@ def parse_arguments() -> SimpleNamespace:
                         'n_latents axis); unused for other '
                         'latents2attractors options. Defaults to n_latents '
                         'if unset.')
-    parser.add_argument('--allow-partial-warmstart', type=bool, default=False,
+    parser.add_argument('--allow-partial-warmstart', type=str2bool, default=False,
                         help='when warm-starting via --init-model-path/'
                         '--init-epochs (average_checkpoints), tolerate '
                         'checkpoint tensors whose key or shape no longer '
@@ -719,7 +741,7 @@ def parse_arguments() -> SimpleNamespace:
                         'noam_warmup_steps are not set explicitly (default '
                         'is the validated value from common_utils/'
                         'noam_lr_calc.py)')
-    parser.add_argument('--norm-loss-per-spk', type=bool, default=False)
+    parser.add_argument('--norm-loss-per-spk', type=str2bool, default=False)
     parser.add_argument('--num-frames', type=int,
                         help='number of frames in one utterance')
     parser.add_argument('--num-speakers', type=int,
@@ -744,13 +766,13 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--save-intermediate', type=int, default=-1,
                         help='save intermediate models every save_intermediate batches')
     parser.add_argument('--seed', type=int)
-    parser.add_argument('--shuffle-spk-order', type=bool, default=False)
+    parser.add_argument('--shuffle-spk-order', type=str2bool, default=False)
     parser.add_argument('--speakerid-loss', type=str, default='',
                         choices=['arcface', 'vanilla'])
     parser.add_argument('--speakerid-loss-weight', default=0.0, type=float,
                         help='weighting parameter for speaker ID loss')
     parser.add_argument('--speakerid-num-speakers', type=int, default=-1)
-    parser.add_argument('--specaugment', type=bool, default=False)
+    parser.add_argument('--specaugment', type=str2bool, default=False)
     parser.add_argument('--subsampling', type=int)
     parser.add_argument('--time-shuffle', action='store_true',
                         help='Shuffle time-axis order before input to the network')
@@ -767,11 +789,11 @@ def parse_arguments() -> SimpleNamespace:
                         '--train-features-dir; see also '
                         'common_utils/merge_precomputed_features.py to '
                         'combine multiple such directories)')
-    parser.add_argument('--use-detection-error-rate', default=False, type=bool)
-    parser.add_argument('--use-frame-selfattention', default=False, type=bool)
-    parser.add_argument('--use-last-samples', default=True, type=bool)
-    parser.add_argument('--use-posenc', default=False, type=bool)
-    parser.add_argument('--use-pre-crossattention', default=False, type=bool)
+    parser.add_argument('--use-detection-error-rate', default=False, type=str2bool)
+    parser.add_argument('--use-frame-selfattention', default=False, type=str2bool)
+    parser.add_argument('--use-last-samples', default=True, type=str2bool)
+    parser.add_argument('--use-posenc', default=False, type=str2bool)
+    parser.add_argument('--use-pre-crossattention', default=False, type=str2bool)
     parser.add_argument('--vad-loss-weight', default=0.0, type=float)
     parser.add_argument('--valid-data-dir', default=None,
                         help='kaldi-style data dir used for validation.')
