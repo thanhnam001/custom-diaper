@@ -112,6 +112,33 @@ def _wrap_ddp(
         find_unused_parameters=True)
 
 
+class _CPUModelWrapper(torch.nn.Module):
+    """Transparent `.module`-holding stand-in for torch.nn.DataParallel,
+    used when the target device is CPU. DataParallel's constructor derives
+    its behavior from torch.cuda.is_available()/visible device count, not
+    from the caller's chosen device -- so on any machine where a CUDA
+    device happens to be visible, wrapping a CPU-targeted model in
+    DataParallel silently moves it onto that GPU (device_ids ends up
+    length 1) or leaves internal state pointing at cuda:0 that a later
+    model.to('cpu') can't fix (DataParallel.forward() checks parameter
+    device against a `src_device_obj` set once at construction and never
+    updated by .to()), breaking a CPU-targeted run either way. Code
+    elsewhere in this codebase assumes `model.module` always exists
+    (e.g. backend/losses.py::speaker_identification_loss) regardless of
+    wrapper type, and this class's state_dict() keys ("module.xxx") stay
+    compatible with checkpoints saved from a DataParallel/
+    DistributedDataParallel-wrapped model, so it's a drop-in replacement
+    for the CPU case only.
+    """
+
+    def __init__(self, module: torch.nn.Module) -> None:
+        super().__init__()
+        self.module = module
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+
 def get_model(args: SimpleNamespace) -> torch.nn.Module:
     args.in_size = args.feature_dim * (1 + 2 * args.context_size)
     if args.model_type == 'AttractorPerceiver':
@@ -125,6 +152,8 @@ def get_model(args: SimpleNamespace) -> torch.nn.Module:
         # wrapping -- no .to(device) needed here, unlike DataParallel below
         # which scatters/gathers across devices per forward call instead.
         return _wrap_ddp(model, args.device, getattr(args, 'local_rank', 0))
+    if args.device.type != 'cuda':
+        return _CPUModelWrapper(model)
     return torch.nn.DataParallel(model)
 
 
