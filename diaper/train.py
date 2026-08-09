@@ -82,6 +82,14 @@ def _init_fn(worker_id, num_threads=-1):
         threadpoolctl.threadpool_limits(limits=num_threads)
 
 
+def _prefetch_kwargs(num_workers: int, prefetch_factor: int) -> Dict[str, Any]:
+    # DataLoader raises if prefetch_factor is passed at all when
+    # num_workers == 0 (nothing to prefetch on, everything runs in the
+    # main process), so this is only ever included when there's a worker
+    # pool to actually do the prefetching.
+    return {'prefetch_factor': prefetch_factor} if num_workers > 0 else {}
+
+
 def _convert(
     batch: List[Tuple[torch.Tensor, torch.Tensor, str]]
 ) -> Dict[str, Any]:
@@ -380,6 +388,11 @@ def get_training_dataloaders(
         train_batchsize = args.train_batchsize
         dev_batchsize = args.dev_batchsize
 
+    # Pinned host memory makes the batch's H2D copy (CPU tensor -> GPU)
+    # faster/asynchronous; meaningless (and just wasted pinning overhead)
+    # when there's no GPU to copy to.
+    pin_memory = args.device.type == 'cuda'
+
     if args.train_precomputed_dir is not None or \
             args.valid_precomputed_dir is not None:
         assert not (args.train_precomputed_dir is None) and \
@@ -416,6 +429,8 @@ def get_training_dataloaders(
             sampler=train_sampler,
             worker_init_fn=functools.partial(
                 _init_fn, num_threads=args.num_threads),
+            pin_memory=pin_memory,
+            **_prefetch_kwargs(args.num_workers, args.prefetch_factor),
         )
 
         dev_loader = DataLoader(
@@ -426,6 +441,8 @@ def get_training_dataloaders(
             shuffle=False,
             worker_init_fn=functools.partial(
                 _init_fn, num_threads=args.num_threads),
+            pin_memory=pin_memory,
+            **_prefetch_kwargs(1, args.prefetch_factor),
         )
 
         Y_train, _, _, _, _, _ = train_set.__getitem__(0)
@@ -482,6 +499,8 @@ def get_training_dataloaders(
             sampler=train_sampler,
             worker_init_fn=functools.partial(
                 _init_fn, num_threads=args.num_threads),
+            pin_memory=pin_memory,
+            **_prefetch_kwargs(args.num_workers, args.prefetch_factor),
         )
 
         dev_loader = DataLoader(
@@ -492,6 +511,8 @@ def get_training_dataloaders(
             shuffle=False,
             worker_init_fn=functools.partial(
                 _init_fn, num_threads=args.num_threads),
+            pin_memory=pin_memory,
+            **_prefetch_kwargs(1, args.prefetch_factor),
         )
 
         Y_train, _, _, _, _, _ = train_set.__getitem__(0)
@@ -521,6 +542,8 @@ def get_training_dataloaders(
             sampler=train_sampler,
             worker_init_fn=functools.partial(
                 _init_fn, num_threads=args.num_threads),
+            pin_memory=pin_memory,
+            **_prefetch_kwargs(args.num_workers, args.prefetch_factor),
         )
 
         dev_loader = DataLoader(
@@ -530,6 +553,8 @@ def get_training_dataloaders(
             num_workers=1,
             worker_init_fn=functools.partial(
                 _init_fn, num_threads=args.num_threads),
+            pin_memory=pin_memory,
+            **_prefetch_kwargs(1, args.prefetch_factor),
         )
 
     return train_loader, dev_loader, train_sampler
@@ -803,6 +828,16 @@ def parse_arguments() -> SimpleNamespace:
                         help='maximum number of speakers allowed')
     parser.add_argument('--num-workers', default=1, type=int,
                         help='number of workers in train DataLoader')
+    parser.add_argument('--prefetch-factor', default=2, type=int,
+                        help='number of batches each DataLoader worker '
+                        'prepares ahead of time. Only takes effect where '
+                        '--num-workers (train) or the dev loader\'s fixed '
+                        'worker count is > 0 -- silently ignored otherwise, '
+                        'since there is no worker pool to prefetch on. '
+                        'Raise this if GPU utilization is choppy (idle '
+                        'gaps between batches) due to bursty per-sample '
+                        'read latency, e.g. many small files on network '
+                        'storage.')
     parser.add_argument('--num-threads', default=-1, type=int,
                         help='cap CPU threads used for feature extraction '
                         '(librosa/numpy BLAS) and model training. The '

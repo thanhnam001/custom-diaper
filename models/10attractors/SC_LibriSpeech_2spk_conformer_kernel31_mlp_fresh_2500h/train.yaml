@@ -79,6 +79,7 @@ norm_loss_per_spk: True
 num_frames: 600
 num_speakers: 2
 num_workers: 4
+num_threads: 1
 optimizer: noam
 output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_pretrain2500h
 pre_xa_heads: 4
