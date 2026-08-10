@@ -14,9 +14,12 @@ actually running the scripts against data, not by unit tests.
 ## Environment
 
 Conda env, Python 3.7-era pins (see README.md `## Getting started` for the exact
-`pip`/`conda install` sequence — transformers fork, `torch==1.10.0+cu113`, `librosa`,
+`pip`/`conda install` sequence — `torch==1.10.0+cu113`, `librosa`,
 `safe_gpu`, `yamlargparse==1.31.1`, etc.). There is no `requirements.txt` or
 `pyproject.toml`; the README install block is the source of truth for dependencies.
+There is no `transformers` dependency: the Perceiver encoder this repo used to
+pull it in for (via a fork, `pip install git+https://github.com/fnlandini/
+transformers`) is vendored natively at `diaper/backend/perceiver.py`.
 
 On this machine, the env already exists as a path-based conda env at
 `../Master/repos/DiaPer/.diaper_env` (relative to this repo root, i.e.
@@ -178,7 +181,9 @@ flow in `forward()`:
    FFN blocks) turns spliced acoustic frames into frame embeddings `e`.
 2. `get_attractors()` cross-attends a fixed set of learned latent vectors
    (`latent_attractors`) against the frame embeddings via a `PerceiverBlock`
-   (chained HuggingFace `PerceiverEncoder`s), producing per-Perceiver-block
+   (chained `PerceiverEncoder`s, natively implemented in
+   `diaper/backend/perceiver.py` — see "Model" note below), producing
+   per-Perceiver-block
    latents which are mapped to attractors via `latents2attractors`
    (`dummy` = latents *are* attractors, requires `n_latents == n_attractors`;
    `linear` or `weighted_average` project `n_latents → n_attractors`).

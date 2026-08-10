@@ -100,7 +100,6 @@ dmypy.json
 .vscode/
 *.tar
 results/
-transformers-main/
 dscore/
 ignores/
 experiments/

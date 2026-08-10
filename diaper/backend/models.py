@@ -16,10 +16,9 @@ from backend.updater import (
     NoamOpt,
     setup_optimizer,
 )
+from backend.perceiver import PerceiverConfig, PerceiverEncoder
 from pathlib import Path
 from torch.nn.parallel import DistributedDataParallel
-from transformers.models.perceiver.configuration_perceiver import PerceiverConfig
-from transformers.models.perceiver.modeling_perceiver import PerceiverEncoder
 from types import SimpleNamespace
 from typing import Dict, List, Tuple
 import copy
@@ -576,8 +575,7 @@ class PerceiverBlock(torch.nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         per_prcvblock_latents = []
         for _, layer_module in enumerate(self.encoder_layers):
-            output = layer_module.forward(latents, inputs=inputs)
-            latents = output.last_hidden_state
+            latents = layer_module.forward(latents, inputs=inputs)
             per_prcvblock_latents.append(latents)
         return torch.stack(per_prcvblock_latents)
 

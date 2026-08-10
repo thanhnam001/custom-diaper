@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-# Monkey-patch so pre-3.10-era libraries (old torch/transformers/etc, like
-# this repo's pinned torch==1.10.0 and the fnlandini transformers fork)
-# that still reach for `collections.Container`/`collections.Mapping`/etc
-# keep working on Python 3.10+.
+# Monkey-patch so pre-3.10-era libraries (old torch/etc, like this repo's
+# pinned torch==1.10.0) that still reach for
+# `collections.Container`/`collections.Mapping`/etc keep working on
+# Python 3.10+.
 #
 # Background: Container, Mapping, MutableMapping, Sequence,
 # MutableSequence, Iterable, Iterator, Callable, Hashable, Sized, etc. were
