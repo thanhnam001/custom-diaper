@@ -1171,8 +1171,25 @@ def main_worker(rank: int, world_size: int, args: SimpleNamespace) -> None:
             # final DER reporting for the paper reproduction goes through
             # infer.py + dscore on RTTMs, not this loop.
             dev_batches_qty = 0
+            # Call the raw module directly, not the DDP-wrapped `model`:
+            # DistributedDataParallel.forward() does per-call bookkeeping
+            # tied to the shared NCCL process group (bucket/reducer state,
+            # find_unused_parameters tracking). This dev loop runs on rank 0
+            # only, so if any of that bookkeeping ever triggers an implicit
+            # collective on rank 0 with no matching call on the other
+            # ranks (which never touch `model` during this whole block),
+            # every later collective on that process group -- including the
+            # plain dist.all_reduce(skip, ...) in the train loop above --
+            # pairs up mismatched calls across ranks from then on. Confirmed
+            # via reproduction: with --gpu 1 (no DDP) this never hung; with
+            # --gpu 2 it hung deterministically on epoch 2's first training
+            # iteration, at the first collective call after this dev loop,
+            # every time. Eval doesn't need DDP's gradient-sync machinery
+            # anyway (no backward() happens here), so bypassing it entirely
+            # is safe and avoids the DDP-wrapper forward() call altogether.
+            eval_model = model.module if hasattr(model, 'module') else model
             with torch.no_grad():
-                model.eval()
+                eval_model.eval()
                 dev_pbar = tqdm(dev_loader, total=len(dev_loader))
                 for i, batch in enumerate(dev_pbar):
                     features = batch['xs']
@@ -1187,7 +1204,7 @@ def main_worker(rank: int, world_size: int, args: SimpleNamespace) -> None:
                     features = torch.stack(features).to(args.device)
                     labels = torch.stack(labels).to(args.device)
                     dev_loss, acum_dev_metrics = compute_loss_and_metrics(
-                        model, labels, features, n_speakers,
+                        eval_model, labels, features, n_speakers,
                         spkids, acum_dev_metrics, args)
                     if not torch.isfinite(dev_loss):
                         dev_pbar.write(

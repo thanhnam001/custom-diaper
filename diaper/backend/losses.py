@@ -370,8 +370,13 @@ def speaker_identification_loss(
     loss_function = torch.nn.CrossEntropyLoss()
     selected_att = torch.stack(selected_att)
     indices = torch.stack(indices)
+    # model may be the DataParallel/DistributedDataParallel wrapper (used
+    # during training, where .module is where get_speaker_logits actually
+    # lives) or the raw module directly (used for eval -- see train.py's
+    # dev loop, which deliberately avoids calling through the DDP wrapper).
+    base_model = model.module if hasattr(model, 'module') else model
     return loss_function(
-        model.module.get_speaker_logits(selected_att, indices),
+        base_model.get_speaker_logits(selected_att, indices),
         indices) / indices.shape[0]
 
 
@@ -400,7 +405,10 @@ def get_speaker_counting_loss(
     0..n_attractors speakers, trained with cross-entropy. Ground-truth counts
     above n_attractors are clipped -- the model has no attractor slot to
     represent them anyway."""
-    qty_logits = model.module.get_speaker_counting_logits(attractors)
+    # See speaker_identification_loss's comment above: model may be the
+    # DDP/DataParallel wrapper (training) or the raw module (eval).
+    base_model = model.module if hasattr(model, 'module') else model
+    qty_logits = base_model.get_speaker_counting_logits(attractors)
     targets = torch.tensor(
         [min(n, qty_logits.shape[1] - 1) for n in n_speakers],
         device=qty_logits.device, dtype=torch.long)
