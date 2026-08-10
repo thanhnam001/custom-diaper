@@ -90,6 +90,23 @@ def _prefetch_kwargs(num_workers: int, prefetch_factor: int) -> Dict[str, Any]:
     return {'prefetch_factor': prefetch_factor} if num_workers > 0 else {}
 
 
+def _persistent_workers_kwargs(num_workers: int) -> Dict[str, Any]:
+    # persistent_workers=True keeps the worker pool (and, with
+    # pin_memory=True, its pin-memory thread) alive across epochs instead
+    # of tearing it down and fork()-ing a fresh one every time the loader
+    # is re-iterated. Re-forking every epoch from a process that already
+    # has an active CUDA context -- and, once pin_memory=True, a
+    # continuously CUDA-touching background thread -- is a known-unsafe
+    # combination (PyTorch/CUDA + fork()) that can deadlock the freshly
+    # forked worker the moment the fork lands mid-syscall in that thread;
+    # this is the suspected cause of the epoch-2-iteration-0 training hang
+    # introduced when pin_memory was enabled. DataLoader raises if
+    # persistent_workers=True is passed with num_workers == 0 (no pool to
+    # keep alive), so this is only ever included when there's a worker
+    # pool to persist.
+    return {'persistent_workers': True} if num_workers > 0 else {}
+
+
 def _convert(
     batch: List[Tuple[torch.Tensor, torch.Tensor, str]]
 ) -> Dict[str, Any]:
@@ -431,6 +448,7 @@ def get_training_dataloaders(
                 _init_fn, num_threads=args.num_threads),
             pin_memory=pin_memory,
             **_prefetch_kwargs(args.num_workers, args.prefetch_factor),
+            **_persistent_workers_kwargs(args.num_workers),
         )
 
         dev_loader = DataLoader(
@@ -443,6 +461,7 @@ def get_training_dataloaders(
                 _init_fn, num_threads=args.num_threads),
             pin_memory=pin_memory,
             **_prefetch_kwargs(1, args.prefetch_factor),
+            **_persistent_workers_kwargs(1),
         )
 
         Y_train, _, _, _, _, _ = train_set.__getitem__(0)
@@ -501,6 +520,7 @@ def get_training_dataloaders(
                 _init_fn, num_threads=args.num_threads),
             pin_memory=pin_memory,
             **_prefetch_kwargs(args.num_workers, args.prefetch_factor),
+            **_persistent_workers_kwargs(args.num_workers),
         )
 
         dev_loader = DataLoader(
@@ -513,6 +533,7 @@ def get_training_dataloaders(
                 _init_fn, num_threads=args.num_threads),
             pin_memory=pin_memory,
             **_prefetch_kwargs(1, args.prefetch_factor),
+            **_persistent_workers_kwargs(1),
         )
 
         Y_train, _, _, _, _, _ = train_set.__getitem__(0)
@@ -544,6 +565,7 @@ def get_training_dataloaders(
                 _init_fn, num_threads=args.num_threads),
             pin_memory=pin_memory,
             **_prefetch_kwargs(args.num_workers, args.prefetch_factor),
+            **_persistent_workers_kwargs(args.num_workers),
         )
 
         dev_loader = DataLoader(
@@ -555,6 +577,7 @@ def get_training_dataloaders(
                 _init_fn, num_threads=args.num_threads),
             pin_memory=pin_memory,
             **_prefetch_kwargs(1, args.prefetch_factor),
+            **_persistent_workers_kwargs(1),
         )
 
     return train_loader, dev_loader, train_sampler
