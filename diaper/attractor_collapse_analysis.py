@@ -135,6 +135,7 @@ if __name__ == '__main__':
                 per_frameenclayer_ys_logits,
                 per_frameenclayer_attractors_logits,
                 per_frameenclayer_attractors,
+                _spk_counting_logits,  # unused: this script doesn't train
                 per_prcvblock_ys_logits,
                 per_prcvblock_attractors_logits,
                 per_prcvblock_attractors,

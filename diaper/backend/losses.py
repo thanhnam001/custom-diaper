@@ -281,6 +281,7 @@ def get_loss(
     attractors_logits: torch.Tensor,
     model: torch.nn.Module,
     attractors: torch.Tensor,
+    spk_counting_logits: torch.Tensor,
     total_n_speakers: int,
     spkid_labels: torch.Tensor,
     args: SimpleNamespace
@@ -314,14 +315,19 @@ def get_loss(
         att_qty_loss = torch.zeros((), device=attractors_logits.device)
     else:
         att_qty_loss = get_attractor_quantity_loss(attractors_logits, n_speakers)
-    if args.spk_counting_loss_weight == 0:
+    if args.spk_counting_loss_weight == 0 or spk_counting_logits is None:
+        # spk_counting_logits is None for intermediate-layer get_loss()
+        # calls (--intermediate-loss-frameencoder/-perceiver): like
+        # attractor_diversity_loss, spk_counting_loss is a final-layer-only
+        # loss -- see AttractorPerceiver.forward()'s comment for why it's
+        # computed there instead of via a separate call from here. The
+        # --use-spk-counting-head/--spk-counting-loss-weight consistency
+        # check now lives in AttractorPerceiver.__init__, since it's a
+        # model-construction-time concern.
         spk_counting_loss = torch.zeros((), device=attractors_logits.device)
     else:
-        assert args.use_spk_counting_head, \
-            "--spk-counting-loss-weight > 0 requires --use-spk-counting-head " \
-            "true (the model was built without the head otherwise)."
         spk_counting_loss = get_speaker_counting_loss(
-            model, attractors, n_speakers, args)
+            spk_counting_logits, n_speakers)
     if args.vad_loss_weight == 0:
         vad_loss_value = torch.zeros((), device=attractors_logits.device)
     else:
@@ -393,10 +399,8 @@ def get_attractor_quantity_loss(
 
 
 def get_speaker_counting_loss(
-    model: torch.nn.Module,
-    attractors: torch.Tensor,
+    qty_logits: torch.Tensor,
     n_speakers: List[int],
-    args: SimpleNamespace
 ) -> torch.Tensor:
     """Classification alternative to get_attractor_quantity_loss: instead of
     regressing a count via MSE on the sum of the existence head's (self.counter)
@@ -404,11 +408,12 @@ def get_speaker_counting_loss(
     mean-pools the attractor set and predicts a categorical distribution over
     0..n_attractors speakers, trained with cross-entropy. Ground-truth counts
     above n_attractors are clipped -- the model has no attractor slot to
-    represent them anyway."""
-    # See speaker_identification_loss's comment above: model may be the
-    # DDP/DataParallel wrapper (training) or the raw module (eval).
-    base_model = model.module if hasattr(model, 'module') else model
-    qty_logits = base_model.get_speaker_counting_logits(attractors)
+    represent them anyway.
+
+    qty_logits is precomputed by AttractorPerceiver.forward() (not called
+    here via model.module.get_speaker_counting_logits(...)) so that it's
+    part of the DDP-wrapped forward() call's own return value -- see the
+    comment in forward() for why that matters under --gpu > 1."""
     targets = torch.tensor(
         [min(n, qty_logits.shape[1] - 1) for n in n_speakers],
         device=qty_logits.device, dtype=torch.long)

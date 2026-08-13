@@ -152,6 +152,7 @@ def compute_loss_and_metrics(
         per_frameenclayer_ys_logits,
         per_frameenclayer_attractors_logits,
         per_frameenclayer_attractors,
+        spk_counting_logits,
         per_prcvblock_ys_logits,
         per_prcvblock_attractors_logits,
         per_prcvblock_attractors,
@@ -177,6 +178,7 @@ def compute_loss_and_metrics(
         per_frameenclayer_attractors_logits[:, :, -1],
         model,
         per_frameenclayer_attractors[:, :, :, -1],
+        spk_counting_logits,
         args.speakerid_num_speakers,
         spkid_labels,
         args
@@ -245,6 +247,7 @@ def compute_loss_and_metrics(
                 per_frameenclayer_attractors_logits[:, :, j],
                 model,
                 per_frameenclayer_attractors[:, :, :, j],
+                None,  # spk_counting_loss is final-layer-only, see get_loss()
                 args.speakerid_num_speakers,
                 spkid_labels,
                 args
@@ -294,6 +297,7 @@ def compute_loss_and_metrics(
                 per_prcvblock_attractors_logits[:, :, i],
                 model,
                 per_prcvblock_attractors[:, :, :, i],
+                None,  # spk_counting_loss is final-layer-only, see get_loss()
                 args.speakerid_num_speakers,
                 spkid_labels,
                 args

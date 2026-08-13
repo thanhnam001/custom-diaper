@@ -218,6 +218,7 @@ def estimate_diarization_outputs(
         per_frameenclayer_ys_logits,
         per_frameenclayer_attractors_logits,
         per_frameenclayer_attractors,
+        _spk_counting_logits,  # unused: only compute_loss_and_metrics trains
         per_prcvblock_ys_logits,
         per_prcvblock_attractors_logits,
         per_prcvblock_attractors,

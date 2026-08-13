@@ -823,6 +823,15 @@ class AttractorPerceiver(torch.nn.Module):
             )
         else:
             self.spk_counting_head = None
+            # Caught here (construction time) rather than only inside
+            # get_loss() on the first batch: getattr default 0 keeps this
+            # a no-op for inference-only callers (infer.py/
+            # infer_single_file.py) whose args namespace has no
+            # spk_counting_loss_weight field at all.
+            assert getattr(args, 'spk_counting_loss_weight', 0) == 0, \
+                "--spk-counting-loss-weight > 0 requires " \
+                "--use-spk-counting-head true (the model was built " \
+                "without the head otherwise)."
         self.detach_attractor_loss = args.detach_attractor_loss
         self.attractor_frame_comparison = args.attractor_frame_comparison
         if self.attractor_frame_comparison == 'xattention':
@@ -942,6 +951,26 @@ class AttractorPerceiver(torch.nn.Module):
             all_frame_embs.append(e.reshape(pad_shape[0], pad_shape[1], -1))
         # output: (BT, F)
 
+        # Computed here (inside forward(), using the final frame-encoder
+        # layer's attractors, i.e. what per_frameenclayer_atts[-1] becomes
+        # after the stack/permute below) rather than via a separate
+        # base_model.get_speaker_counting_logits(...) call made from
+        # backend/losses.py after forward() already returned: DDP's
+        # find_unused_parameters=True only considers parameters reachable
+        # from what this forward() call itself returns, so a later,
+        # separate call touching spk_counting_head's parameters was
+        # invisible to it -- DDP would mark them unused, then desync and
+        # hang once backward() produced real gradients for them anyway.
+        # Like attractor_diversity_loss (see train.py), this makes
+        # spk_counting_loss a final-frame-encoder-layer-only loss -- it is
+        # not recomputed per intermediate layer under
+        # --intermediate-loss-frameencoder/--intermediate-loss-perceiver.
+        if self.spk_counting_head is not None:
+            spk_counting_logits = self.spk_counting_head(
+                per_frameenclayer_atts[-1].mean(dim=1))
+        else:
+            spk_counting_logits = None
+
         # emb: [(T, E), ...]
         e = e.reshape(pad_shape[0], pad_shape[1], -1)
         if args.use_posenc:
@@ -995,6 +1024,7 @@ class AttractorPerceiver(torch.nn.Module):
             per_frameenclayer_ys_logits,
             per_frameenclayer_atts_logits,
             per_frameenclayer_atts,
+            spk_counting_logits,
             per_prcvblock_ys_logits,
             per_prcvblock_attractors_logits,
             per_prcvblock_attractors,
@@ -1010,18 +1040,6 @@ class AttractorPerceiver(torch.nn.Module):
             return 0
         else:
             return self.speaker_layer(attractors, spkid_labels)
-
-    def get_speaker_counting_logits(
-        self, attractors: torch.Tensor
-    ) -> torch.Tensor:
-        """attractors: (B, n_attractors, d_latents) -> (B, n_attractors+1)
-        class logits over the number of active speakers, via mean-pooling
-        across the attractor-slot axis (order-independent, so this can take
-        either the raw or PIT-permuted attractor set)."""
-        assert self.spk_counting_head is not None, \
-            "get_speaker_counting_logits called but --use-spk-counting-head " \
-            "was not set when this model was constructed."
-        return self.spk_counting_head(attractors.mean(dim=1))
 
     def get_attractors(
         self,
