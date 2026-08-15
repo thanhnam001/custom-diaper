@@ -873,6 +873,16 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--optimizer', type=str)
     parser.add_argument('--osd-loss-weight', default=0.0, type=float)
     parser.add_argument('--output-path', type=str)
+    parser.add_argument('--overlap-loss-weight', default=1.0, type=float,
+                        help='multiplier applied to activation_loss (the '
+                        'main PIT-matched BCE) at frames where more than '
+                        'one reference speaker is simultaneously active, '
+                        'to counteract those frames being a minority class '
+                        'under plain per-frame BCE. 1.0 (default) is a '
+                        'no-op -- every frame weighted equally, matching '
+                        'prior behavior. >1.0 upweights overlap frames; '
+                        'values <1.0 are allowed but downweight them '
+                        'instead, which is not the intended use.')
     parser.add_argument('--posenc-maxlen', type=int, default=36000,
                         help="The maximum length allowed for the positional \
                         encoding. i.e. 36000 with 0.1s frames is 1 hour")
