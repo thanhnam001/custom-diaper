@@ -129,6 +129,7 @@ def _format_metrics(metrics: Dict[str, float], n: float) -> str:
         f"spk_qty(ref/pred)={avg['avg_ref_spk_qty']:.2f}/"
         f"{avg['avg_pred_spk_qty']:.2f} "
         f"attractor_acc={avg['attractor_accuracy']:.2f}% "
+        f"spk_counting_acc={avg['spk_counting_accuracy']:.2f}% "
         f"attractorfree_DER={avg['attractorfree_DER']:.2f}% "
         f"(miss={avg['attractorfree_DER_miss']:.2f} "
         f"fa={avg['attractorfree_DER_FA']:.2f} "
@@ -356,6 +357,21 @@ def compute_loss_and_metrics(
         active_attractors.detach() == exists_mask.detach()
     ).float().mean().item() * 100
 
+    # spk_counting_logits is None whenever --use-spk-counting-head is off
+    # (see AttractorPerceiver.forward()); mirrors get_speaker_counting_loss's
+    # ground-truth clipping (counts above n_attractors have no class to
+    # predict into) so the accuracy target matches what was trained against.
+    if spk_counting_logits is None:
+        spk_counting_accuracy = 0.0
+    else:
+        spk_counting_targets = torch.tensor(
+            [min(n, spk_counting_logits.shape[1] - 1) for n in n_speakers],
+            device=spk_counting_logits.device, dtype=torch.long)
+        spk_counting_accuracy = (
+            spk_counting_logits.detach().argmax(dim=1) ==
+            spk_counting_targets
+        ).float().mean().item() * 100
+
     metrics = calculate_metrics(
         labels.detach(), y_probs_gated.detach(), threshold=0.5)
 
@@ -380,6 +396,7 @@ def compute_loss_and_metrics(
     acum_metrics['attractor_existence_loss'] += attractor_existence_loss.item()
     acum_metrics['att_qty_loss'] += att_qty_loss.item()
     acum_metrics['spk_counting_loss'] += spk_counting_loss.item()
+    acum_metrics['spk_counting_accuracy'] += spk_counting_accuracy
     acum_metrics['vad_loss'] += vad_loss.item()
     acum_metrics['osd_loss'] += osd_loss.item()
     acum_metrics['spkid_loss'] += spkid_loss.item()
