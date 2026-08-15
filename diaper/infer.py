@@ -42,6 +42,7 @@ from scipy.signal import medfilt
 from tqdm import tqdm
 import copy
 import csv
+import gc
 import logging
 import matplotlib.pyplot as plt
 import numpy as np
@@ -479,7 +480,28 @@ def parse_arguments() -> SimpleNamespace:
                         help='if a GPU forward pass raises a CUDA '
                         'out-of-memory error (typically on unusually long '
                         'recordings), retry that single recording on CPU '
-                        'instead of skipping it. Has no effect if --gpu < 1.')
+                        'instead of skipping it. Has no effect if --gpu < 1. '
+                        'CAUTION: the CPU retry has no memory ceiling of '
+                        'its own -- on a long enough recording it can '
+                        'allocate tens of GB in one shot and risk an '
+                        'OS-level OOM that takes down unrelated processes '
+                        '(e.g. sshd) rather than just this one, especially '
+                        'on a shared/remote host. Pair with '
+                        '--max-input-frames so runaway recordings are '
+                        'skipped before either device is asked to hold '
+                        'that allocation.')
+    parser.add_argument('--max-input-frames', default=-1, type=int,
+                        help='skip (with a warning, before attempting any '
+                        'forward pass on either device) recordings whose '
+                        'subsampled frame count exceeds this. Whole-'
+                        'recording self-attention (--use-frame-selfattention '
+                        'with --num-frames -1) is O(frames^2) in memory, so '
+                        'unusually long recordings can demand tens of GB '
+                        'for the attention matrices alone -- this bounds '
+                        'that risk (for both the primary attempt and the '
+                        '--fallback-cpu-oom retry) instead of discovering '
+                        'the limit via a crash. -1 (default) disables the '
+                        'check, matching prior behavior.')
     parser.add_argument('--hidden-size', type=int,
                         help='number of units in SA blocks')
     parser.add_argument('--infer-data-dir', help='inference data directory.')
@@ -661,6 +683,17 @@ if __name__ == '__main__':
                     "this file will be missing from metrics_per_file.csv. "
                     "Rerun into an empty --rttms-dir for complete metrics.")
             continue
+        n_frames = batch['xs'][0].shape[0]
+        if args.max_input_frames > 0 and n_frames > args.max_input_frames:
+            logging.warning(
+                f"{name}: {n_frames} subsampled frames exceeds "
+                f"--max-input-frames {args.max_input_frames} -- "
+                "whole-recording self-attention memory is O(frames^2), so "
+                "this file risks exhausting GPU VRAM and (if "
+                "--fallback-cpu-oom is set) system RAM badly enough to "
+                "trigger an OS-level OOM. Skipping rather than attempting "
+                "either device.")
+            continue
         try:
             input = torch.stack(batch['xs']).to(args.device)
             with torch.no_grad():
@@ -672,13 +705,24 @@ if __name__ == '__main__':
                     y_probs
                 ) = estimate_diarization_outputs(model, input, args)
         except RuntimeError as e:
-            if cpu_model is None or "out of memory" not in str(e).lower():
-                logging.error(f"{name}: inference failed: {e}")
+            is_oom = "out of memory" in str(e).lower()
+            error_msg = str(e)
+            # The exception's traceback holds references to every tensor
+            # from the failed forward pass (a reference cycle that plain
+            # refcounting can't break), so torch.cuda.empty_cache() alone
+            # won't release that VRAM -- gc.collect() first is required to
+            # actually drop those refs. See
+            # https://pytorch.org/docs/stable/notes/faq.html#my-out-of-memory-exception-handler-cant-allocate-memory
+            del e
+            if is_oom and args.device.type == "cuda":
+                gc.collect()
+                torch.cuda.empty_cache()
+            if cpu_model is None or not is_oom:
+                logging.error(f"{name}: inference failed: {error_msg}")
                 continue
             logging.warning(
                 f"{name}: CUDA out of memory, retrying this recording on "
                 "CPU")
-            torch.cuda.empty_cache()
             try:
                 input = torch.stack(batch['xs']).to("cpu")
                 with torch.no_grad():
@@ -692,6 +736,8 @@ if __name__ == '__main__':
             except RuntimeError as cpu_e:
                 logging.error(
                     f"{name}: CPU fallback also failed: {cpu_e}")
+                del cpu_e
+                gc.collect()
                 continue
 
         try:
