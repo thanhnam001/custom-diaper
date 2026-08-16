@@ -148,6 +148,18 @@ def pit_loss_multispk(
     activation_loss = F.binary_cross_entropy_with_logits(
         logits_matched, target_matched, reduction='none')
     activation_loss[torch.where(target_matched == -1)] = 0
+    if args.overlap_loss_weight != 1.0:
+        # Frames where >1 reference speaker is simultaneously active are a
+        # minority class that plain per-frame BCE otherwise treats the same
+        # as single-speaker frames, giving the model no extra incentive to
+        # resolve concurrent speakers correctly. Upweighting those frames'
+        # contribution targets that directly. n_active counts real (==1)
+        # labels only, so -1 padding and the pad_labels_zeros zero-fill
+        # never register as "active".
+        n_active = (target_matched == 1).sum(dim=2, keepdim=True).float()
+        overlap_mask = (n_active > 1).float()
+        frame_weight = 1.0 + (args.overlap_loss_weight - 1.0) * overlap_mask
+        activation_loss = activation_loss * frame_weight
     # normalize by sequence length
     activation_loss = torch.sum(activation_loss, axis=1) / (target_matched != -1).sum(axis=1)
     if args.norm_loss_per_spk:

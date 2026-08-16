@@ -1,0 +1,107 @@
+# Stage 2/3: adapt the 2500h mlp_fresh_spkcounting lineage's stage-1
+# pretrain (SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting/
+# train.yaml) to 1-10 speakers, with --overlap-loss-weight added on top of
+# that lineage's existing loss composition.
+#
+# Reuses that lineage's stage-1 pretrain checkpoint UNCHANGED (same
+# init_model_path/init_epochs as the sibling directory's
+# train_10spks_mlp.yaml) -- overlap_loss_weight is only added from this
+# stage onward, since stage 1's data is fixed at 2 speakers and has no
+# overlap frames to reweight in the first place.
+#
+# Why overlap_loss_weight: 3.0 -- this session's MSDWild per-head analysis
+# on exp13 (SC_LibriSpeech_2spk_conformer_kernel31_adapted1-10_300h_
+# maximum10spks_mlp_unmaskeddiv, the 500h-pretrain/300h-adapt lineage) found
+# OSD_miss ~69% vs VAD_miss ~9%, DER roughly tripling from 2- to
+# 4-concurrent-speaker files (15.4%/34.0%/44.8% DER at 2/3/4 ref speakers),
+# and a follow-up oracle-attractor-selection experiment showing that even a
+# perfectly-correct attractor slot selection only buys ~0.1 DER points --
+# i.e. the gap is a per-frame activation-confidence problem on overlap
+# frames, not a speaker-counting/attractor-selection problem. See
+# diaper/oracle_attractor_analysis.py and this branch's
+# --overlap-loss-weight implementation (diaper/backend/losses.py::
+# pit_loss_multispk, diaper/train.py's --overlap-loss-weight flag) for the
+# full writeup. A smoke test (real 300h_max10spks data, exp13's adapt
+# checkpoint, weight=3.0) confirmed the new loss term is numerically stable
+# end to end; this config is the first real training run of it, on this
+# lineage instead of exp13's because the non-speaker-counting 500h/300h
+# lineage's checkpoints aren't available right now (per user instruction).
+#
+# NOT YET RUNNABLE ON THIS MACHINE: neither this lineage's stage-1 pretrain
+# checkpoint (init_model_path below) nor the 2500h SC precomputed adapt data
+# (train_precomputed_dir/valid_precomputed_dir below) exist locally as of
+# writing -- only the config/pipeline is set up. Sync both to this machine
+# (or point these three paths at wherever they do live) before running.
+# See this lineage's sibling directory (.../mlp_fresh_2500h_spkcounting/
+# train.yaml, train_10spks_mlp.yaml) for the un-modified recipe this is
+# forked from.
+#
+# See SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h/
+# train_10spks_mlp.yaml's header for the rest of the base rationale (2500h
+# SC scaling, noam warmup, batch sizes, masked diversity loss) -- unchanged
+# here beyond overlap_loss_weight.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+spk_counting_loss_weight: 1.0
+overlap_loss_weight: 3.0
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 16
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: False
+latents2attractors: mlp
+log_report_batches_num: 20
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 2400
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_adapted1-10_2500h_maximum10spks_mlp_overlaploss3
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 16
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/validation
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_pretrain2500h/models
+use_spk_counting_head: true
