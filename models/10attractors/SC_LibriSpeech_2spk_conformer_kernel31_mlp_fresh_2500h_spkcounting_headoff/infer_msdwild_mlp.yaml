@@ -1,20 +1,18 @@
 # Inference config for this directory's (2500h pretrain+adapt scale,
-# speaker-counting head OFF from MSDWild finetune onward -- see
-# finetune_msdwild_10spks_mlp.yaml's header for the ablation rationale)
-# MSDWild-finetuned checkpoint (finetune_msdwild_10spks_mlp.yaml's
+# speaker-counting head OFF from stage 2/adapt onward -- see
+# train_10spks_mlp.yaml's header for the ablation rationale) MSDWild-
+# finetuned checkpoint (finetune_msdwild_10spks_mlp.yaml's
 # output_path/models_finetuneMSDWILD/models).
 #
-# Same as
-# SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting/infer_msdwild_mlp.yaml,
-# except use_spk_counting_head: false -- required here for the opposite
-# reason that sibling config sets it true: this lineage's finetuned
-# checkpoint has no spk_counting_head submodule (finetune_msdwild_10spks_mlp.yaml
-# built the model with the head off), so get_model() must not build one
-# either or load_state_dict will fail on an unexpected-keys mismatch in the
-# other direction. As with the sibling config, the flag doesn't affect
-# inference output either way (only estimate_diarization_outputs' existing
-# diarization/attractor logits are used) -- it's purely an
-# architecture-matching requirement.
+# Same as the sibling (plain spkcounting) directory's
+# infer_msdwild_mlp.yaml, except use_spk_counting_head: false -- required
+# here for the opposite reason that sibling config sets it true: this
+# lineage's checkpoints (adapt stage onward) have no spk_counting_head
+# submodule, so get_model() must not build one either or load_state_dict
+# will fail on an unexpected-keys mismatch in the other direction. As with
+# the sibling config, the flag doesn't affect inference output either way
+# (only estimate_diarization_outputs' existing diarization/attractor
+# logits are used) -- it's purely an architecture-matching requirement.
 #
 # median_window_length: 11 / subsampling: 10 follow the paper's
 # collar-dependent post-processing rule for MSDWild's 0.25s collar (see
@@ -25,7 +23,7 @@
 # best range is picked from TensorBoard, e.g.:
 #
 #   python diaper/infer.py \
-#       -c models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff_msdwildft/infer_msdwild_mlp.yaml \
+#       -c models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff/infer_msdwild_mlp.yaml \
 #       --epochs <range> \
 #       --num-threads 4
 
@@ -52,7 +50,7 @@ input_transform: logmel_meannorm
 latents2attractors: mlp
 median_window_length: 11
 model_type: AttractorPerceiver
-models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff_msdwildft/models_finetuneMSDWILD/models
+models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_adapted1-10_2500h_maximum10spks_mlp_headoff/models_finetuneMSDWILD/models
 n_attractors: 10
 n_blocks_attractors: 3
 n_internal_blocks_attractors: 1
@@ -63,7 +61,7 @@ n_xa_heads_attractors: 4
 num_frames: -1
 num_speakers: 10
 pre_xa_heads: 4
-rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff_msdwildft/models_finetuneMSDWILD/msdwild_test_pred
+rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_adapted1-10_2500h_maximum10spks_mlp_headoff/models_finetuneMSDWILD/msdwild_test_pred
 sampling_rate: 16000
 seed: 3
 subsampling: 10

@@ -1,0 +1,101 @@
+# Stage 3/3 (MSDWild): finetune this directory's train_10spks_mlp.yaml
+# stage-2 checkpoint (2500h-scale pretrain+adapt, speaker-counting head OFF
+# from stage 2 onward) on MSDWild.
+#
+# Same recipe as the sibling (plain spkcounting) directory's
+# finetune_msdwild_10spks_mlp.yaml, with use_spk_counting_head: false /
+# spk_counting_loss_weight: 0.0 (see this directory's train_10spks_mlp.yaml
+# header for the full ablation rationale) and init_model_path/output_path
+# pointing at this directory's own stage-2 checkpoint.
+#
+# No allow_partial_warmstart: stage 2's checkpoint in this directory was
+# already built with the head off, so its architecture matches this config
+# exactly -- unlike the earlier MSDWild-only version of this ablation,
+# which warmstarted from the head-on adapt checkpoint and needed
+# allow_partial_warmstart to drop the incompatible tensors.
+#
+# init_epochs: 90-100, the repo's standard range for a stage-2 checkpoint.
+#
+# NOT YET RUNNABLE ON THIS MACHINE: init_model_path depends on this
+# directory's train_10spks_mlp.yaml stage-2 run finishing first (blocked on
+# the missing 2500h pretrain checkpoint/precompute -- see that file's
+# header). train_precomputed_dir/valid_precomputed_dir below, unlike stage
+# 2's, DO already have a local mirror on this machine per CLAUDE.md
+# ("Local data layout"): database/msdwild_precompute_6000frames/{train,dev}
+# -- only the stage-2 blocker applies here, not a missing-data one.
+#
+# After finetuning, evaluate the same way as the other kernel31 MSDWild
+# runs:
+#   python diaper/eval_checkpoint.py -c <this file> --init-epochs <range>
+#   python diaper/analyze_attractor_branch.py -c <this file> --init-epochs <range>
+#   python diaper/attractor_collapse_analysis.py -c <this file> --init-epochs <range>
+# Score the resulting RTTMs with dscore using --collar 0.25 (MSDWild
+# convention -- see CLAUDE.md "Evaluation"). Compare against the plain
+# spkcounting lineage's MSDWild result (results.csv: 20.50% at epochs
+# 157-167) to see whether removing the head from the adapt stage onward
+# actually moves DER, not just the auxiliary loss.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+spk_counting_loss_weight: 0.0
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+early_stopping: true
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_adapted1-10_2500h_maximum10spks_mlp_headoff/models
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: False
+latents2attractors: mlp
+log_report_batches_num: 10
+lr: 1e-6
+max_epochs: 750
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+norm_loss_per_spk: True
+num_frames: 600
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: adam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_adapted1-10_2500h_maximum10spks_mlp_headoff/models_finetuneMSDWILD
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 32
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/msdwild_precompute_6000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/msdwild_precompute_6000frames/dev
+use_spk_counting_head: false

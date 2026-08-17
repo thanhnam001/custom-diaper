@@ -1,0 +1,125 @@
+# Stage 2/3: adapt the 2500h mlp_fresh_spkcounting lineage's stage-1
+# pretrain (SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting/
+# train.yaml, speaker-counting head ON) to 1-10 speakers, with the
+# speaker-counting head turned OFF from this stage onward.
+#
+# Broader than the first cut of this ablation: a tensorboard read of
+# dev_spk_counting_accuracy/loss originally only flagged MSDWild finetune
+# as clearly broken (dev accuracy collapses to 2-4% and never recovers
+# there), so the first version of this experiment only disabled the head
+# at the MSDWild finetune stage, warmstarting from the existing
+# adapt-stage checkpoint. Per user direction, broadened to disable the
+# head starting at the adapt stage itself instead: the finetuned DER is
+# still far off the paper's published numbers (ours: MSDWild collar-0.25
+# ~20.5%, RAMC ~24.2% vs the paper's 15.5%/21.1%), and the adapt stage's
+# own dev_spk_counting_accuracy was only "mediocre but plausible" (up to
+# 73%, noisy, ending around 60%) rather than clean -- plausible that the
+# head is competing for shared attractor-representation capacity for the
+# whole 1-10-speaker adapt stage, not just failing to calibrate during the
+# short MSDWild finetune budget. This version tests that directly by
+# removing the head from the point where multi-speaker training actually
+# starts, so both downstream finetunes (MSDWild and RAMC) inherit a
+# checkpoint that was never trained with this auxiliary task competing for
+# gradient share.
+#
+# Reuses stage 1's pretrain checkpoint (2-speaker only, head on) UNCHANGED
+# -- same init_model_path/init_epochs as the sibling (plain spkcounting)
+# directory's train_10spks_mlp.yaml. Stage 1 isn't rerun: with only 2
+# speakers in that data, the speaker-counting task there is close to
+# trivial (0/1/2), so it's not implicated by the MSDWild-finetune-stage
+# evidence and retraining it wouldn't change what's being tested here.
+#
+# allow_partial_warmstart: true is required (unlike the sibling config's
+# "No allow_partial_warmstart"): stage 1's checkpoint has spk_counting_head.*
+# tensors that this stage's model (use_spk_counting_head: false) has no
+# submodule for -- a strict load_state_dict would fail on an
+# unexpected-keys mismatch. average_checkpoints/_filter_compatible_state_dict
+# (diaper/backend/models.py) drops just those incompatible tensors and
+# loads everything else normally.
+#
+# Downstream: finetune_msdwild_10spks_mlp.yaml and finetune_ramc_10spks_mlp.yaml
+# in this directory both fork from THIS stage's output checkpoint (not the
+# plain spkcounting lineage's), with matching architecture (head off) --
+# neither needs allow_partial_warmstart.
+#
+# init_epochs: 90-100, the repo's standard range for a stage-1 checkpoint
+# (unchanged from the sibling directory).
+#
+# NOT YET RUNNABLE ON THIS MACHINE: neither this lineage's stage-1 pretrain
+# checkpoint (init_model_path below) nor the 2500h SC precomputed adapt
+# data (train_precomputed_dir/valid_precomputed_dir below) exist locally
+# as of writing -- only the config/pipeline is set up. Sync both to this
+# machine (or point these three paths at wherever they do live) before
+# running. See the sibling directory (.../mlp_fresh_2500h_spkcounting/
+# train.yaml, train_10spks_mlp.yaml) for the un-modified recipe this is
+# forked from.
+#
+# See SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h/
+# train_10spks_mlp.yaml's header for the rest of the base rationale (2500h
+# SC scaling, noam warmup, batch sizes, masked diversity loss) -- unchanged
+# here beyond use_spk_counting_head/spk_counting_loss_weight.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+spk_counting_loss_weight: 0.0
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 16
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+allow_partial_warmstart: true
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: False
+latents2attractors: mlp
+log_report_batches_num: 20
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 2400
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_adapted1-10_2500h_maximum10spks_mlp_headoff
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 16
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/validation
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_pretrain2500h/models
+use_spk_counting_head: false

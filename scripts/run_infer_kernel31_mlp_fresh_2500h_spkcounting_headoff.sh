@@ -1,17 +1,12 @@
 #!/bin/bash
 set -e
 
-# Runs inference (+ dscore scoring) for the 1 finetuned checkpoint of the
-# SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff_msdwildft
-# ablation
-# (models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff_msdwildft/):
+# Runs inference (+ dscore scoring) for the 2 finetuned checkpoints of the
+# SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff
+# lineage
+# (models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff/):
 #   - MSDWild finetune: infer_msdwild_mlp.yaml
-#
-# No RAMC run here: this ablation doesn't touch RAMC finetune (see
-# run_pipeline_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff_msdwildft.sh's
-# header) -- use the plain spkcounting lineage's existing RAMC results
-# (models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting/
-# infer_ramc_mlp.yaml) for that comparison instead.
+#   - RAMC finetune:    infer_ramc_mlp.yaml
 #
 # Same as scripts/run_infer_kernel31_mlp_fresh_2500h_spkcounting.sh (see
 # that script's header for the full rationale: server-local absolute paths
@@ -19,16 +14,24 @@ set -e
 # averaged over the last $MAX_CHECKPOINTS_TO_AVERAGE, a config skipped if
 # its models_path has no checkpoints yet, reference RTTM derived from
 # infer_data_dir) -- only CONFIG_DIR/RUNS names change to point at this
-# (speaker-counting head off from MSDWild finetune) lineage instead.
+# (speaker-counting head off from the adapt stage onward) lineage instead.
 #
-# To directly compare against the plain spkcounting lineage's per-head
-# breakdown (not just DER) -- confirm whether disabling the head actually
-# recovers DER on the speaker-count-heavy (3-4 speaker) files it was
-# meant to help, not just avoid the collapsed auxiliary loss -- use
-# infer.py --compute-metrics --collar 0.25 alongside this script.
+# --use-spk-counting-head is train-only architecture; both configs here set
+# it to false to match this lineage's checkpoints (see
+# models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff/
+# infer_msdwild_mlp.yaml's header) -- it doesn't affect inference output
+# either way, so nothing else about inference/scoring here differs from the
+# sibling script.
+#
+# Compare the resulting DER against the plain spkcounting lineage's numbers
+# (results.csv: MSDWild 20.50% at epochs 157-167, RAMC 24.17% at epochs
+# 110-120) to see whether removing the head from the adapt stage onward
+# actually moves DER, not just the auxiliary loss. For a per-head
+# breakdown (not just DER) use infer.py --compute-metrics --collar 0.25
+# alongside this script.
 #
 # Run from the repo root, on the server:
-#   ./scripts/run_infer_kernel31_mlp_fresh_2500h_spkcounting_headoff_msdwildft.sh
+#   ./scripts/run_infer_kernel31_mlp_fresh_2500h_spkcounting_headoff.sh
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
@@ -38,11 +41,12 @@ DSCORE_ENV="/data/ocr/namvt17/custom-diaper/dscore/.dscore"
 
 MAX_CHECKPOINTS_TO_AVERAGE=10
 
-CONFIG_DIR="models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff_msdwildft"
+CONFIG_DIR="models/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_headoff"
 
 # name|config|dscore collar (empty = no --collar flag, i.e. 0s)
 RUNS=(
-    "msdwild_mlp_spkcounting_headoff_msdwildft|${CONFIG_DIR}/infer_msdwild_mlp.yaml|0.25"
+    "msdwild_mlp_spkcounting_headoff|${CONFIG_DIR}/infer_msdwild_mlp.yaml|0.25"
+    "ramc_mlp_spkcounting_headoff|${CONFIG_DIR}/infer_ramc_mlp.yaml|"
 )
 
 for run in "${RUNS[@]}"; do
