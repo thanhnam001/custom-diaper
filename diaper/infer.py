@@ -477,10 +477,21 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--gpu', '-g', default=-1, type=int,
                         help='GPU ID (negative value indicates CPU)')
     parser.add_argument('--fallback-cpu-oom', default=False, type=str2bool,
-                        help='if a GPU forward pass raises a CUDA '
-                        'out-of-memory error (typically on unusually long '
-                        'recordings), retry that single recording on CPU '
-                        'instead of skipping it. Has no effect if --gpu < 1. '
+                        help='if a GPU forward pass raises a CUDA error '
+                        '(OOM or otherwise -- see note below), retry that '
+                        'recording on CPU instead of skipping it. Has no '
+                        'effect if --gpu < 1. Once this has triggered once, '
+                        'ALL remaining recordings in this run are also run '
+                        'on CPU, not just the one that failed: a CUDA '
+                        'fault can leave the process\'s CUDA context unable '
+                        'to reliably recover even after '
+                        'gc.collect()/empty_cache(), so every later '
+                        'recording that still tries the GPU tends to fail '
+                        'the same way too. Falling back permanently trades '
+                        'GPU speed on the remainder of the run for actually '
+                        'getting output; rerun later (e.g. into a fresh '
+                        '--rttms-dir) to retry the skipped/CPU-run files on '
+                        'GPU if you believe they would have fit. '
                         'CAUTION: the CPU retry has no memory ceiling of '
                         'its own -- on a long enough recording it can '
                         'allocate tens of GB in one shot and risk an '
@@ -674,6 +685,14 @@ if __name__ == '__main__':
     per_file_metrics = []
 
     infer_pbar = tqdm(infer_loader, total=len(infer_loader))
+    # Once a GPU forward pass raises a CUDA error, the process's CUDA
+    # context can be left unable to reliably recover even after
+    # gc.collect()/empty_cache() -- every later recording that still tries
+    # the GPU then tends to fail the same way, each failure re-triggering
+    # (and never releasing) more VRAM/context corruption. So the very first
+    # CUDA fault permanently routes the rest of THIS run's recordings to
+    # cpu_model instead of retrying model on args.device.
+    gpu_disabled = False
     for batch in infer_pbar:
         name = batch['names'][0]
         if os.path.exists(join(out_dir, f"{name}.rttm")):
@@ -694,8 +713,17 @@ if __name__ == '__main__':
                 "trigger an OS-level OOM. Skipping rather than attempting "
                 "either device.")
             continue
+        if args.device.type != "cuda":
+            # Plain CPU run (--gpu < 1): cpu_model is never built for this
+            # case (see --fallback-cpu-oom setup above) -- model itself is
+            # already the CPU-resident one, via model.to(args.device).
+            run_on_gpu, run_device, run_model = False, args.device, model
+        elif gpu_disabled:
+            run_on_gpu, run_device, run_model = False, "cpu", cpu_model
+        else:
+            run_on_gpu, run_device, run_model = True, args.device, model
         try:
-            input = torch.stack(batch['xs']).to(args.device)
+            input = torch.stack(batch['xs']).to(run_device)
             with torch.no_grad():
                 (
                     y_pred,
@@ -703,10 +731,16 @@ if __name__ == '__main__':
                     per_prcvblock_latents,
                     per_prcvblock_attractors,
                     y_probs
-                ) = estimate_diarization_outputs(model, input, args)
+                ) = estimate_diarization_outputs(run_model, input, args)
         except RuntimeError as e:
-            is_oom = "out of memory" in str(e).lower()
             error_msg = str(e)
+            # Not just "out of memory": a poisoned CUDA context tends to
+            # surface as other messages on later calls (illegal memory
+            # access, cuDNN/cuBLAS alloc failures, etc.), and those also
+            # need the gpu_disabled fallback below, not a bare skip.
+            is_cuda_error = run_on_gpu and any(
+                s in error_msg.lower()
+                for s in ("out of memory", "cuda", "cublas", "cudnn"))
             # The exception's traceback holds references to every tensor
             # from the failed forward pass (a reference cycle that plain
             # refcounting can't break), so torch.cuda.empty_cache() alone
@@ -714,15 +748,22 @@ if __name__ == '__main__':
             # actually drop those refs. See
             # https://pytorch.org/docs/stable/notes/faq.html#my-out-of-memory-exception-handler-cant-allocate-memory
             del e
-            if is_oom and args.device.type == "cuda":
+            if is_cuda_error:
                 gc.collect()
                 torch.cuda.empty_cache()
-            if cpu_model is None or not is_oom:
+                if cpu_model is not None and not gpu_disabled:
+                    gpu_disabled = True
+                    logging.warning(
+                        f"{name}: CUDA error ({error_msg}) -- treating "
+                        "this process's CUDA context as unreliable and "
+                        "switching to CPU for this and all remaining "
+                        "recordings in this run (see --fallback-cpu-oom "
+                        "help).")
+            if cpu_model is None or not is_cuda_error:
                 logging.error(f"{name}: inference failed: {error_msg}")
                 continue
             logging.warning(
-                f"{name}: CUDA out of memory, retrying this recording on "
-                "CPU")
+                f"{name}: retrying this recording on CPU")
             try:
                 input = torch.stack(batch['xs']).to("cpu")
                 with torch.no_grad():
