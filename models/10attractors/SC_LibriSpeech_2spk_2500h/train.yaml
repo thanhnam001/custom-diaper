@@ -26,14 +26,32 @@
 # noam_model_size/noam_warmup_steps) for the same reason as the conformer
 # 2500h sibling: one epoch is now a 5x longer pass over the SC set, so a
 # fixed absolute warmup-step count would no longer cover a sane fraction of
-# the first epoch. The paper itself fixes warm-up at 200k steps across all
-# its own runs (Table III caption); this repo's fraction-based convention
-# is kept here for consistency with every other lineage's stage-1 config,
-# not changed per-run.
+# the first epoch.
 #
-# dev_batchsize / train_batchsize are unchanged from the 500h config (data
-# volume doesn't change per-batch memory) -- revisit only if the actual
-# 2500h run needs it.
+# Cross-checked against the paper authors' own shipped pretrain config
+# (../Master/repos/DiaPer/models/10attractors/SC_LibriSpeech_2spk/train.yaml,
+# pristine/untouched, train_data_dir literally named v1_2spks_2480.6h --
+# confirms the ~2500h figure): it sets noam_model_size: 512 /
+# noam_warmup_steps: 200000 (fixed, not fraction-based). DON'T copy those
+# raw numbers here -- diaper/common_utils/noam_lr_calc.py's docstring
+# documents that this repo already investigated them and found
+# noam_warmup_steps: 200000 exceeds total_steps at any reasonable
+# batch/epoch count reconstructable for this codebase (the schedule would
+# never finish ramping, i.e. LR climbs monotonically the whole run instead
+# of the normal ramp-then-decay shape). What IS corroborated and worth
+# preserving is the resulting peak LR, 9.882e-5, which the same docstring
+# shows falls out of BOTH original configs (512/200000 here, 1024/100000
+# for the adapt stage) despite their very different raw numbers --
+# noam_warmup_fraction's default noam_peak_lr (diaper/train.py) is already
+# set to that exact validated value, so leaving noam_peak_lr unset here
+# reproduces the paper's actual effective LR schedule correctly.
+#
+# dev_batchsize / train_batchsize are unchanged from the 500h config, not
+# matched to the authors' pretrain batch size (train_batchsize: 32,
+# dev_batchsize: 128) -- batch size is treated as a local GPU-memory knob
+# in this repo's existing convention (every lineage picks its own,
+# independent of the paper), which the fraction-based warmup above is
+# specifically designed to stay robust to regardless of batch size.
 #
 # This checkpoint is the starting point for this lineage's stage 2
 # (train_10spks.yaml in this directory).

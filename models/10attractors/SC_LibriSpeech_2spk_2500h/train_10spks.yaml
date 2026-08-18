@@ -21,6 +21,23 @@
 # directory (data volume scaled 5x, so per-epoch step count needs the
 # warmup fraction to auto-scale with it rather than a fixed step count).
 #
+# The paper authors' own shipped adapt-stage config
+# (../Master/repos/DiaPer/models/10attractors/
+# SC_LibriSpeech_2spk_adapted1-10/train.yaml) has clearly been hand-edited
+# locally on top of the original (gpu: 4, train_batchsize: 1, and
+# train_data_dir/valid_data_dir repointed at a 10-hour WSL debug subset,
+# with the original `v1_1-10spks_all2500h` path left commented out above
+# it) -- so its train_batchsize/gpu/num_workers aren't trustworthy as the
+# real recipe. Its noam_model_size: 1024 / noam_warmup_steps: 100000
+# ARE trustworthy though: diaper/common_utils/noam_lr_calc.py's docstring
+# corroborates these independently (the resulting peak LR, 9.882e-5,
+# matches the pretrain stage's 512/200000 despite very different raw
+# numbers -- not the kind of coincidence a debug edit would produce).
+# Don't copy the raw 1024/100000 here for the same reason as train.yaml
+# (that peak LR is preserved by the fraction-based default noam_peak_lr in
+# diaper/train.py; the raw warmup step count doesn't complete its ramp at
+# any batch/epoch count reconstructable for this codebase).
+#
 # init_epochs: 90-100 -- standard convention for a stage-1 checkpoint (see
 # CLAUDE.md / MEMORY.md's init_epochs 90-100 convention note).
 #

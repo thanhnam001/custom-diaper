@@ -1,13 +1,26 @@
 # Stage 4/4: finetune the 2500h adapt checkpoint (train_10spks.yaml in
 # this directory) on real RAMC data.
 #
-# Same recipe as SC_LibriSpeech_2spk_adapted1-10/finetune_ramc_10spks.yaml
-# (the paper's own baseline architecture) -- init_model_path/output_path
-# are the only things that change here, pointing at this lineage's 2500h
-# adapt-stage checkpoint instead of the 300h one. Finetuning itself doesn't
-# scale by SC hours (it trains on the real, fixed-size RAMC corpus, not
-# synthetic conversations), so train_precomputed_dir/valid_precomputed_dir
-# are unchanged from the 300h config -- same real data either way.
+# Same hyperparameters as the paper authors' own shipped finetune config
+# (../Master/repos/DiaPer/models/10attractors/
+# SC_LibriSpeech_2spk_adapted1-10_finetuneRAMC/train.yaml, distributed
+# alongside their public RAMC checkpoint) -- lr 1e-6, max_epochs 500, adam,
+# same architecture. init_model_path/output_path are the only things that
+# differ, pointing at this lineage's 2500h adapt-stage checkpoint instead
+# of a placeholder. Finetuning itself doesn't scale by SC hours (it trains
+# on the real, fixed-size RAMC corpus, not synthetic conversations), so
+# train_precomputed_dir/valid_precomputed_dir are unchanged from the 300h
+# config -- same real data either way.
+#
+# early_stopping is deliberately NOT set here (defaults to False in
+# train.py): the paper authors' own shipped config has no such field, and
+# --early-stopping/--early-stopping-patience don't exist at all in the
+# upstream DiaPer train.py (grep confirms) -- it's a local addition to this
+# fork, not part of the paper's method. This repo's existing
+# SC_LibriSpeech_2spk_adapted1-10/finetune_ramc_10spks.yaml sets
+# early_stopping: true, which is a local deviation from the paper's actual
+# recipe (run the full fixed epoch count, then pick/average checkpoints
+# from TensorBoard afterward) -- don't copy that into this lineage.
 #
 # init_epochs: 90-100, same convention as every stage-2/3 config in this
 # repo.
@@ -24,7 +37,6 @@ detach_attractor_loss: False
 dev_batchsize: 128
 dropout_attractors: 0.1
 dropout_frames: 0.1
-early_stopping: true
 feature_dim: 40
 frame_encoder_heads: 4
 frame_encoder_layers: 4
