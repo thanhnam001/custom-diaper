@@ -1,0 +1,61 @@
+# Inference config for this directory's (2500h pretrain+adapt scale,
+# paper-baseline architecture -- self_attention frame encoder,
+# latents2attractors: weighted_average) MSDWild-finetuned checkpoint
+# (finetune_msdwild_10spks.yaml's output_path/models_finetuneMSDWILD/models).
+#
+# median_window_length: 11 / subsampling: 10 follow the paper's
+# collar-dependent post-processing rule for MSDWild's 0.25s collar (see
+# CLAUDE.md's "Evaluation" section).
+#
+# epochs is intentionally left out: no checkpoints exist yet for this
+# lineage. Pass it on the command line once the finetune run finishes and a
+# best range is picked from TensorBoard, e.g.:
+#
+#   python diaper/infer.py \
+#       -c models/10attractors/SC_LibriSpeech_2spk_2500h/infer_msdwild.yaml \
+#       --epochs <range> \
+#       --num-threads 4
+#
+# scripts/run_infer_2500h.sh auto-detects and averages the latest
+# checkpoints instead of requiring epochs to be filled in here.
+
+# inference options
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+estimate_spk_qty: -1
+estimate_spk_qty_thr: 0.5
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+gpu: 1
+infer_data_dir: /data/ocr/namvt17/dataset/diarization/msdwild/kaldi/test
+input_transform: logmel_meannorm
+latents2attractors: weighted_average
+median_window_length: 11
+model_type: AttractorPerceiver
+models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_adapted1-10_2500h_maximum10spks/models_finetuneMSDWILD/models
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+num_frames: -1
+num_speakers: 10
+pre_xa_heads: 4
+rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_adapted1-10_2500h_maximum10spks/models_finetuneMSDWILD/msdwild_test_pred
+sampling_rate: 16000
+seed: 3
+subsampling: 10
+time_shuffle: False
+threshold: 0.5
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True

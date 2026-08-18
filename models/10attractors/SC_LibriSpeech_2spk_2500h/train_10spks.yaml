@@ -1,0 +1,86 @@
+# Stage 2/4: adapt the 2500h pretrain (train.yaml in this directory) to
+# 1-10 speakers.
+#
+# Same architecture/recipe as the 300h config
+# (SC_LibriSpeech_2spk_adapted1-10/train_10spks.yaml -- the paper's own
+# baseline: self_attention frame encoder, latents2attractors:
+# weighted_average), scaled to the paper's Table III step H ("Adaptation
+# (multi-speaker SC)", set "SC1-10 16 kHz") data volume: each per-speaker-
+# count SC set is 2500h (see this directory's train.yaml header).
+#
+# train_precomputed_dir / valid_precomputed_dir point at the same 2500h
+# 1-10-speaker SC precompute already used by
+# SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h/train_10spks_mlp.yaml
+# -- same underlying corpus, only the downstream architecture differs.
+#
+# No intermediate 5-speaker stage here, matching the 300h baseline's
+# train_10spks.yaml (which forks directly from stage 1, not through a
+# train_5spks checkpoint) and every 2500h-scale lineage in this repo.
+#
+# noam_warmup_fraction: 0.10, same rationale as train.yaml in this
+# directory (data volume scaled 5x, so per-epoch step count needs the
+# warmup fraction to auto-scale with it rather than a fixed step count).
+#
+# init_epochs: 90-100 -- standard convention for a stage-1 checkpoint (see
+# CLAUDE.md / MEMORY.md's init_epochs 90-100 convention note).
+#
+# dev_batchsize / train_batchsize unchanged from the 300h config -- revisit
+# only if the actual 2500h run needs it.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 32
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_pretrain2500h/models
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+latents2attractors: weighted_average
+log_report_batches_num: 24
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 2400
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_adapted1-10_2500h_maximum10spks
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 16
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/validation

@@ -1,0 +1,95 @@
+# Stage 1/4: pretrain on 2-speaker LibriSpeech-simulated conversations.
+#
+# This is the paper's OWN baseline architecture -- self_attention frame
+# encoder, latents2attractors: weighted_average, no conformer/mlp/
+# diversity-loss deviations -- unlike every other lineage under models/
+# 10attractors/, which is a named ablation on top of some baseline (see
+# SC_LibriSpeech_2spk/train.yaml, the 500h version of this same config,
+# for the architecture source). The only change here is data volume,
+# scaled from 500h to 2500h to match the paper's Table III recipe (step G:
+# "Training (2-speaker SC)", set "SC2 16 kHz", which per Section IV.A is
+# 2500h of audio, same as every other per-speaker-count SC set -- see
+# CLAUDE.md's "Background reading" section for where that figure comes
+# from). This makes SC_LibriSpeech_2spk_2500h -> _adapted1-10 -> finetune
+# MSDWild/RAMC (see scripts/run_pipeline_2500h.sh) the actual paper-
+# reproduction pipeline, as opposed to any of the conformer_*/linear_*
+# lineages, which are all deliberate single-variable deviations from it.
+#
+# train_precomputed_dir / valid_precomputed_dir point at the same 2500h
+# 2-speaker SC precompute already used by
+# SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h/train.yaml -- it's
+# the same underlying corpus regardless of downstream architecture, only
+# the frame-encoder/attractor-projection choice differs between the two
+# lineages.
+#
+# noam_warmup_fraction: 0.10 (instead of the 500h config's fixed
+# noam_model_size/noam_warmup_steps) for the same reason as the conformer
+# 2500h sibling: one epoch is now a 5x longer pass over the SC set, so a
+# fixed absolute warmup-step count would no longer cover a sane fraction of
+# the first epoch. The paper itself fixes warm-up at 200k steps across all
+# its own runs (Table III caption); this repo's fraction-based convention
+# is kept here for consistency with every other lineage's stage-1 config,
+# not changed per-run.
+#
+# dev_batchsize / train_batchsize are unchanged from the 500h config (data
+# volume doesn't change per-batch memory) -- revisit only if the actual
+# 2500h run needs it.
+#
+# This checkpoint is the starting point for this lineage's stage 2
+# (train_10spks.yaml in this directory).
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 96
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: self_attention
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+latents2attractors: weighted_average
+log_report_batches_num: 256
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_warmup_fraction: 0.10
+norm_loss_per_spk: True
+num_frames: 600
+num_speakers: 2
+num_workers: 4
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_pretrain2500h
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 120
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_fixed_2spks/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_fixed_2spks/validation
