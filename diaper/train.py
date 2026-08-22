@@ -695,6 +695,25 @@ def parse_arguments() -> SimpleNamespace:
                         'backend/models.py::ConvolutionModule')
     parser.add_argument('--context-activations', type=str2bool, default=False)
     parser.add_argument('--context-size', type=int)
+    parser.add_argument('--ebranchformer-cgmlp-kernel-size', default=31,
+                        type=int,
+                        help='depthwise-conv kernel size inside the cgMLP '
+                        '(local) branch of the ebranchformer frame encoder '
+                        '(must be odd; only takes effect when '
+                        '--frame-encoder-type=ebranchformer)')
+    parser.add_argument('--ebranchformer-cgmlp-units', default=None, type=int,
+                        help='hidden size of the cgMLP branch in the '
+                        'ebranchformer frame encoder. Defaults to '
+                        '4 * --d-latents when unset, which keeps a block '
+                        'roughly parameter-matched to a ConformerBlock; '
+                        'this is the main lever on the block\'s size -- see '
+                        'backend/models.py::ConvolutionalGatingMLP')
+    parser.add_argument('--ebranchformer-merge-kernel-size', default=31,
+                        type=int,
+                        help='depthwise-conv kernel size in the enhanced '
+                        'merge module that combines the attention and cgMLP '
+                        'branches (must be odd; this conv is what makes it '
+                        'E-Branchformer rather than plain Branchformer)')
     parser.add_argument('--d-latents', type=int, default=None,
                         help='dimension of latents')
     parser.add_argument('--detach-attractor-loss', type=str2bool,
@@ -741,7 +760,9 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--frame-encoder-layers', type=int)
     parser.add_argument('--frame-encoder-units', type=int)
     parser.add_argument('--frame-encoder-type', default='self_attention',
-                        type=str, choices=['self_attention', 'conformer'],
+                        type=str,
+                        choices=['self_attention', 'conformer',
+                                 'ebranchformer'],
                         help='block type used inside the frame encoder loop')
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--frame-size', type=int)

@@ -550,6 +550,189 @@ class ConformerBlock(torch.nn.Module):
         return self.final_lnorm(x)
 
 
+class ConvolutionalSpatialGatingUnit(torch.nn.Module):
+    """ CSGU from Branchformer's cgMLP: splits its input in half along the
+    channel axis into (value, gate), passes the gate through LayerNorm + a
+    depthwise conv over time, and gates the value with it multiplicatively.
+
+    This is the "local" half of an (E-)Branchformer block: the depthwise
+    conv gives an explicit, bounded receptive field over time, which is
+    what self-attention alone models only implicitly.
+
+    Same unmasked-padding caveat as ConvolutionModule: the depthwise conv
+    mixes up to kernel_size // 2 padded frames into valid ones at the
+    boundary. Consistent with the rest of the model, which does not mask
+    padding either.
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        d_channels: int,
+        kernel_size: int,
+        dropout: float,
+    ) -> None:
+        super(ConvolutionalSpatialGatingUnit, self).__init__()
+        assert kernel_size % 2 == 1, \
+            f"kernel_size must be odd for symmetric padding, got {kernel_size}"
+        assert d_channels % 2 == 0, \
+            f"cgMLP hidden size must be even to split into value/gate, " \
+            f"got {d_channels}"
+        self.device = device
+        self.dropout = dropout
+        d_half = d_channels // 2
+        self.gate_norm = torch.nn.LayerNorm(d_half, device=self.device)
+        self.gate_conv = torch.nn.Conv1d(
+            d_half, d_half, kernel_size=kernel_size,
+            padding=(kernel_size - 1) // 2, groups=d_half, device=self.device)
+        # Branchformer initializes the gating branch near-identity (small
+        # weights, unit bias) so the unit starts out passing the value
+        # through roughly unchanged instead of multiplying it by noise --
+        # without this the block is noticeably harder to train early on.
+        torch.nn.init.normal_(self.gate_conv.weight, std=1e-6)
+        torch.nn.init.ones_(self.gate_conv.bias)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, 2*d_half)
+        value, gate = x.chunk(2, dim=-1)
+        gate = self.gate_norm(gate)
+        gate = self.gate_conv(gate.transpose(1, 2)).transpose(1, 2)
+        out = value * gate
+        return F.dropout(out, self.dropout, training=self.training)
+
+
+class ConvolutionalGatingMLP(torch.nn.Module):
+    """ cgMLP: LayerNorm -> Linear(d -> 2*hidden) -> GELU -> CSGU ->
+    Linear(hidden -> d). The local/convolutional branch of an
+    (E-)Branchformer block.
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        d_latents: int,
+        d_hidden: int,
+        kernel_size: int,
+        dropout: float,
+    ) -> None:
+        super(ConvolutionalGatingMLP, self).__init__()
+        self.device = device
+        self.dropout = dropout
+        self.norm = torch.nn.LayerNorm(d_latents, device=self.device)
+        self.linear_in = torch.nn.Linear(
+            d_latents, 2 * d_hidden, device=self.device)
+        self.csgu = ConvolutionalSpatialGatingUnit(
+            self.device, 2 * d_hidden, kernel_size, dropout)
+        self.linear_out = torch.nn.Linear(
+            d_hidden, d_latents, device=self.device)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, F)
+        x = self.norm(x)
+        x = F.gelu(self.linear_in(x))
+        x = self.csgu(x)
+        return self.linear_out(x)
+
+
+class EBranchformerBlock(torch.nn.Module):
+    """ E-Branchformer block, a drop-in alternative to ConformerBlock.
+
+    Where Conformer chains self-attention and convolution sequentially,
+    (E-)Branchformer runs them as two PARALLEL branches over the same input
+    and merges them:
+
+        x -> macaron FFN/2
+          -> LayerNorm -> { MHSA (global) , cgMLP (local) } -> merge
+          -> macaron FFN/2 -> LayerNorm
+
+    The "E" (enhanced merge, Kim et al. 2023) is the merge module: the two
+    branch outputs are concatenated to 2*d, passed through a depthwise conv
+    over time with a residual around it, then projected back to d. A plain
+    concat+linear (original Branchformer) cannot mix information across
+    time during the merge; the depthwise conv can, and that is where the
+    reported gain over both Conformer and vanilla Branchformer comes from.
+
+    Uses the same flattened (BT, F) + batch_size calling convention as
+    MultiHeadSelfAttention and ConformerBlock, so it plugs into
+    AttractorPerceiver's per-layer loop unchanged. Like ConformerBlock it
+    reuses this file's absolute-position MultiHeadSelfAttention rather than
+    a relative-position variant.
+
+    NOTE ON COST: attention is still O(T^2) here -- E-Branchformer changes
+    what is computed alongside attention, not the attention itself. It does
+    NOT relieve the whole-recording memory ceiling that blocks RAMC
+    inference (num_frames: -1, subsampling: 5) on a small GPU. Only a
+    linear-time sequence mixer would, and that was deliberately out of
+    scope for this lineage.
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        d_latents: int,
+        n_heads: int,
+        d_units: int,
+        cgmlp_units: int,
+        cgmlp_kernel_size: int,
+        merge_kernel_size: int,
+        dropout: float,
+    ) -> None:
+        super(EBranchformerBlock, self).__init__()
+        assert merge_kernel_size % 2 == 1, \
+            f"merge_kernel_size must be odd for symmetric padding, got " \
+            f"{merge_kernel_size}"
+        self.device = device
+        self.dropout = dropout
+        self.ff1_lnorm = torch.nn.LayerNorm(d_latents, device=self.device)
+        self.ff1 = PositionwiseFeedForward(
+            self.device, d_latents, d_units, dropout)
+        self.branch_lnorm = torch.nn.LayerNorm(d_latents, device=self.device)
+        self.mhsa = MultiHeadSelfAttention(
+            self.device, d_latents, n_heads, dropout)
+        self.cgmlp = ConvolutionalGatingMLP(
+            self.device, d_latents, cgmlp_units, cgmlp_kernel_size, dropout)
+        self.merge_conv = torch.nn.Conv1d(
+            2 * d_latents, 2 * d_latents, kernel_size=merge_kernel_size,
+            padding=(merge_kernel_size - 1) // 2, groups=2 * d_latents,
+            device=self.device)
+        self.merge_proj = torch.nn.Linear(
+            2 * d_latents, d_latents, device=self.device)
+        self.ff2_lnorm = torch.nn.LayerNorm(d_latents, device=self.device)
+        self.ff2 = PositionwiseFeedForward(
+            self.device, d_latents, d_units, dropout)
+        self.final_lnorm = torch.nn.LayerNorm(d_latents, device=self.device)
+
+    def __call__(self, x: torch.Tensor, batch_size: int) -> torch.Tensor:
+        # x: (BT, F)
+        x = x + 0.5 * F.dropout(
+            self.ff1(self.ff1_lnorm(x)), self.dropout, training=self.training)
+
+        residual = x
+        normed = self.branch_lnorm(x)
+        # Global branch: MHSA consumes the flattened (BT, F) layout.
+        x_att = self.mhsa(normed, batch_size)
+        # Local branch: cgMLP needs (B, T, F), so reshape around it.
+        feat_dim = normed.shape[-1]
+        seq_len = normed.shape[0] // batch_size
+        x_cg = self.cgmlp(normed.reshape(batch_size, seq_len, feat_dim))
+        x_cg = x_cg.reshape(-1, feat_dim)
+
+        merged = torch.cat([x_att, x_cg], dim=-1)  # (BT, 2F)
+        merged_bt = merged.reshape(batch_size, seq_len, 2 * feat_dim)
+        conv_out = self.merge_conv(
+            merged_bt.transpose(1, 2)).transpose(1, 2)
+        assert conv_out.shape[1] == seq_len, \
+            f"merge_conv must preserve sequence length, got " \
+            f"{seq_len} -> {conv_out.shape[1]} (check stride/padding)"
+        merged = (merged_bt + conv_out).reshape(-1, 2 * feat_dim)
+        x = residual + F.dropout(
+            self.merge_proj(merged), self.dropout, training=self.training)
+
+        x = x + 0.5 * F.dropout(
+            self.ff2(self.ff2_lnorm(x)), self.dropout, training=self.training)
+        return self.final_lnorm(x)
+
+
 class PerceiverBlock(torch.nn.Module):
 
     def __init__(
@@ -691,9 +874,10 @@ class AttractorPerceiver(torch.nn.Module):
         else:
             self.pre_crossattention = None
         self.use_frame_selfattention = args.use_frame_selfattention
-        assert args.frame_encoder_type != 'conformer' or \
+        assert args.frame_encoder_type == 'self_attention' or \
             self.use_frame_selfattention, \
-            "frame_encoder_type='conformer' requires use_frame_selfattention=True"
+            f"frame_encoder_type='{args.frame_encoder_type}' requires " \
+            "use_frame_selfattention=True"
         if self.use_frame_selfattention:
             self.linear_in = torch.nn.Linear(
                 args.in_size, args.d_latents, device=self.device)
@@ -713,6 +897,30 @@ class AttractorPerceiver(torch.nn.Module):
                                        args.conformer_conv_kernel_size,
                                        args.dropout_frames,
                                        args.conv_norm_type)
+                    )
+                elif self.frame_encoder_type == 'ebranchformer':
+                    # Default the cgMLP hidden size to 4 * d_latents rather
+                    # than frame_encoder_units. Two reasons: 4x is a
+                    # standard cgMLP expansion ratio, and at d_latents=128
+                    # it makes an E-Branchformer block 1.17x a kernel-31
+                    # ConformerBlock instead of 1.72x -- close enough that
+                    # a conformer-vs-ebranchformer result is about the
+                    # architecture rather than about parameter count.
+                    # Raise it explicitly to trade size for capacity.
+                    cgmlp_units = (args.ebranchformer_cgmlp_units
+                                   if args.ebranchformer_cgmlp_units
+                                   else 4 * args.d_latents)
+                    setattr(
+                        self,
+                        '{}{:d}'.format("ebranchformer_", i),
+                        EBranchformerBlock(
+                            self.device, args.d_latents,
+                            args.frame_encoder_heads,
+                            args.frame_encoder_units,
+                            cgmlp_units,
+                            args.ebranchformer_cgmlp_kernel_size,
+                            args.ebranchformer_merge_kernel_size,
+                            args.dropout_frames)
                     )
                 else:
                     setattr(
@@ -888,6 +1096,9 @@ class AttractorPerceiver(torch.nn.Module):
         for i in range(self.n_layers):
             if self.frame_encoder_type == 'conformer':
                 e = getattr(self, '{}{:d}'.format("conformer_", i))(
+                    e, inputs.shape[0])
+            elif self.frame_encoder_type == 'ebranchformer':
+                e = getattr(self, '{}{:d}'.format("ebranchformer_", i))(
                     e, inputs.shape[0])
             else:
                 # layer normalization
@@ -1110,6 +1321,10 @@ class AttractorPerceiver(torch.nn.Module):
         if self.frame_encoder_type == 'conformer':
             frame_encoder_modules += [
                 getattr(self, '{}{:d}'.format("conformer_", i))
+                for i in range(self.n_layers)]
+        elif self.frame_encoder_type == 'ebranchformer':
+            frame_encoder_modules += [
+                getattr(self, '{}{:d}'.format("ebranchformer_", i))
                 for i in range(self.n_layers)]
         else:
             frame_encoder_modules += (

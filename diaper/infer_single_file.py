@@ -164,8 +164,25 @@ def parse_arguments() -> InferenceArgs:
     parser.add_argument('--frame-encoder-layers', type=int)
     parser.add_argument('--frame-encoder-units', type=int)
     parser.add_argument('--frame-encoder-type', default='self_attention',
-                        type=str, choices=['self_attention', 'conformer'],
+                        type=str,
+                        choices=['self_attention', 'conformer',
+                                 'ebranchformer'],
                         help='block type used inside the frame encoder loop')
+    parser.add_argument('--ebranchformer-cgmlp-kernel-size', default=31,
+                        type=int,
+                        help='depthwise-conv kernel size inside the cgMLP '
+                        '(local) branch of the ebranchformer frame encoder; '
+                        'must match the value the model was trained with')
+    parser.add_argument('--ebranchformer-cgmlp-units', default=None, type=int,
+                        help='hidden size of the cgMLP branch in the '
+                        'ebranchformer frame encoder (defaults to '
+                        '4 * --d-latents when unset); must match the '
+                        'value the model was trained with')
+    parser.add_argument('--ebranchformer-merge-kernel-size', default=31,
+                        type=int,
+                        help='depthwise-conv kernel size in the enhanced '
+                        'merge module of the ebranchformer frame encoder; '
+                        'must match the value the model was trained with')
     parser.add_argument('--frame-size', type=int)
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--gpu', '-g', default=-1, type=int,
