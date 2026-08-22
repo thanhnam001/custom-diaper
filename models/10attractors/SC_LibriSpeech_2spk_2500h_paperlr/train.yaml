@@ -1,0 +1,148 @@
+# Stage 1/4: pretrain on 2-speaker LibriSpeech-simulated conversations, at
+# the paper's Table III data scale (2500h) AND with the paper's actual Noam
+# schedule *shape* -- which the sibling SC_LibriSpeech_2spk_2500h lineage
+# does not reproduce.
+#
+# WHY THIS LINEAGE EXISTS
+# -----------------------
+# SC_LibriSpeech_2spk_2500h matched the paper's architecture and data volume
+# but still landed ~4 DER points behind the authors' own shipped checkpoint
+# on MSDWild at *both* the adapt and finetune stages (see the analysis that
+# produced this directory). The finetune stage was not the problem -- it ran
+# to epoch 524 vs the paper's shipped 515-525 window. The deficit was in the
+# SC stages, and it was an optimization-budget deficit, not a data one:
+#
+#   Table III's caption states "The warm-up in Noam was always carried out
+#   for 200k steps." The authors' own pretrain config
+#   (../../../../Master/repos/DiaPer/models/10attractors/SC_LibriSpeech_2spk/
+#   train.yaml, pristine/untouched) pairs that with train_batchsize: 32.
+#   For 2500h of 1-minute chunks over 100 epochs that is ~372,500 optimizer
+#   steps, so a 200k warmup is 53.7% of the run -- LR ramps for over half
+#   of training and then barely decays, ending around 7.2e-5, i.e. the
+#   paper trains at close to peak LR the entire time.
+#
+#   The 2500h sibling ran train_batchsize: 120 with noam_warmup_fraction:
+#   0.10. Measured from its TensorBoard: 99,342 total steps (3.75x fewer
+#   updates than the paper, exactly the 120/32 batch ratio), LR peaking at
+#   step 5,056 (5.1% of the run, not the configured 10% -- see "WARMUP
+#   FRACTION IS NOT RESUME-STABLE" below) and decaying to 2.157e-5, i.e.
+#   3.4x below where the paper finishes.
+#
+# So the sibling did far fewer updates AND spent almost the whole run
+# decaying. That combination underfits, and an underfit DiaPer fails in a
+# very specific way the paper itself documents (Table VIII): the model
+# "tends to find less speech, increasing the missed speech rate
+# considerably". That is precisely the measured symptom -- our adapt-stage
+# checkpoint scored miss=40.78 vs the paper's 22.89, with predicted speaker
+# quantity 0.63 vs 0.90.
+#
+# NOAM PARAMETERS FOR train_batchsize: 128
+# ----------------------------------------
+# This config uses train_batchsize: 128 (a deliberate throughput choice, 4x
+# the paper's 32 -- NOT an attempt to match their batch size). Two
+# corrections follow from that, and together they are the whole point of
+# this lineage:
+#
+#  1. warmup scaled inversely with batch, to preserve the paper's 53.7%
+#     ramp fraction. 2500h of 1-min chunks at batch 128 is ~931 steps/epoch
+#     (derived from the sibling's measured 993 steps/epoch at batch 120),
+#     so ~93,100 steps over 100 epochs, and 53.7% of that is 50,000.
+#  2. peak LR sqrt-scaled UP for the 4x larger batch: the paper's validated
+#     peak of 9.882e-5 x sqrt(128/32) = 1.976e-4. Square-root (not linear)
+#     scaling is the standard correction for Adam-family optimizers and is
+#     the conservative choice here -- backend/losses.py's PIT cost-matrix
+#     guard exists because this model *can* diverge, so linear (4x) scaling
+#     was not worth the risk.
+#
+# Solving noam_model_size = 1 / (peak_lr^2 * warmup) for those two values
+# gives model_size = 512 -- exactly the paper's own noam_model_size. That
+# is not a coincidence and is a useful sanity check: squaring a 2x peak-LR
+# increase and dividing by a 4x warmup decrease cancel exactly, so any
+# batch size scaled this way lands back on the paper's model_size. If you
+# change train_batchsize, recompute with:
+#   python diaper/common_utils/noam_lr_calc.py --epochs 100 \
+#       --iters-per-epoch <chunks_per_epoch / your_batch> \
+#       --warmup-fraction 0.537 --peak-lr <9.882e-5 * sqrt(batch/32)>
+#
+# WARMUP FRACTION IS NOT RESUME-STABLE -- USE EXPLICIT STEPS
+# ----------------------------------------------------------
+# noam_model_size/noam_warmup_steps are set explicitly here rather than via
+# noam_warmup_fraction on purpose. train.py only auto-computes them when
+# *both* are unset (see the `args.noam_model_size is None or
+# args.noam_warmup_steps is None` branch), deriving them from
+# len(train_loader) at startup -- so the realized schedule silently depends
+# on whatever train_batchsize the run was last resumed with. The sibling
+# lineage shows the failure mode: it was configured for a 10% warmup but
+# measurably peaked at 5.1%, across a run that spans 3 TensorBoard event
+# files on 2 different machines. Explicit values are identical on every
+# resume, which is also exactly what the paper's own configs do.
+#
+# Everything else -- architecture (self_attention frame encoder,
+# latents2attractors: weighted_average), loss weights, num_frames: 600
+# (1-minute sequences), max_epochs: 100 -- is unchanged from
+# SC_LibriSpeech_2spk_2500h/train.yaml so that the Noam schedule and batch
+# size are the only variables between the two lineages.
+#
+# Data: same 2500h 2-speaker SC precompute as the sibling lineage. Note the
+# paper's SC path carries a --no-use-energies suffix ours does not; that
+# was checked against ../../../../Master/repos/EEND_dataprep and
+# `use_energies` there only ever builds a directory name -- it is never set
+# and never passed to any generation script, so the difference is cosmetic.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 96
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_type: self_attention
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+latents2attractors: weighted_average
+log_report_batches_num: 256
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_model_size: 512
+noam_warmup_steps: 50000
+norm_loss_per_spk: True
+num_frames: 600
+num_speakers: 2
+num_workers: 4
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_pretrain2500h
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 128
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_fixed_2spks/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_fixed_2spks/validation

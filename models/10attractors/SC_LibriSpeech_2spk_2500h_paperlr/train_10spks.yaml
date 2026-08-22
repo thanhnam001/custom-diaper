@@ -1,0 +1,119 @@
+# Stage 2/4: adapt this lineage's 2500h 2-speaker pretrain (train.yaml in
+# this directory) to 1-10 speakers on 2500h of multi-speaker SC.
+#
+# See train.yaml's header for the full rationale behind this lineage (the
+# paper's Noam schedule shape, and why the SC_LibriSpeech_2spk_2500h
+# sibling underfits). This file applies the same correction to the adapt
+# stage, with one deliberate difference in how peak LR is chosen -- see
+# below.
+#
+# NOAM PARAMETERS FOR train_batchsize: 22
+# ---------------------------------------
+# 2500h of 4-minute chunks at batch 22 is ~904 steps/epoch (derived from
+# the sibling lineage's measured 1,243 steps/epoch at batch 16), so ~90,400
+# steps over 100 epochs. warmup = 53.7% of that = 48,500, matching the
+# paper's ramp fraction (Table III caption: warm-up always 200k steps,
+# which is 53.7% of their pretrain run).
+#
+# Peak LR is left at the paper's validated 9.882e-5 -- deliberately NOT
+# sqrt-scaled the way train.yaml's is. The reason is that the scaling in
+# train.yaml is anchored to a batch size we actually know (the authors'
+# pristine pretrain config says train_batchsize: 32), whereas the authors'
+# adapt config is not trustworthy on this point: it has clearly been
+# hand-edited for a local debug run (gpu: 4, train_batchsize: 1, and
+# train_data_dir/valid_data_dir repointed at a 10-hour WSL subset with the
+# real v1_1-10spks_all2500h path commented out above it). Its
+# noam_warmup_steps: 100000 cannot be reconciled with batch 32 either --
+# that would put warmup past the end of the run -- so their adapt batch was
+# almost certainly much smaller than 32, and sqrt-scaling from an unknown
+# baseline would be inventing a number. What IS corroborated is the peak LR
+# itself: noam_model_size/noam_warmup_steps of 512/200000 (pretrain) and
+# 1024/100000 (adapt) both yield 9.882e-5 despite very different raw
+# values, and diaper/common_utils/noam_lr_calc.py's docstring records that
+# the same figure independently converged a 2-chunk overfit test to DER=0.
+#
+# This is not a no-op relative to the sibling lineage even at an unchanged
+# peak: fixing the ramp fraction is what keeps LR high through the back
+# half of training. The sibling peaked at 17.7% of its run and decayed to
+# 3.658e-5; this schedule ends at 7.239e-5, ~2x higher, which is the half
+# of the diagnosis that is independent of batch size.
+#
+# noam_model_size = 1 / (peak_lr^2 * warmup) = 1 / (9.882e-5^2 * 48500)
+#                 = 2111.
+# Recompute with diaper/common_utils/noam_lr_calc.py if train_batchsize
+# changes -- and see train.yaml's "WARMUP FRACTION IS NOT RESUME-STABLE"
+# note for why both values are pinned explicitly instead of using
+# noam_warmup_fraction.
+#
+# num_frames: 2400 = 4-minute sequences, matching the paper: "all DiaPer
+# models were adapted to the set of 1-10 speakers per recording using
+# sequences of 4 minutes" (Section V-E), motivated in Section V-D by
+# 1-minute sequences averaging only 3.6 speakers vs 5.2 for 4-minute ones.
+# Unchanged from the sibling lineage, which already had this right.
+#
+# init_epochs: 90-100 -- standard warmstart convention for a stage-1
+# checkpoint (see CLAUDE.md / MEMORY.md), and matches the paper's Table III
+# step H ("Init. (# ep.)" = "G (90-100)").
+#
+# No intermediate 5-speaker stage, matching Table III (step G -> H directly)
+# and every 2500h-scale lineage in this repo.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 32
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_type: self_attention
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_pretrain2500h/models
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+latents2attractors: weighted_average
+log_report_batches_num: 24
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_model_size: 2111
+noam_warmup_steps: 48500
+norm_loss_per_spk: True
+num_frames: 2400
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_adapted1-10_2500h_maximum10spks
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 22
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/validation

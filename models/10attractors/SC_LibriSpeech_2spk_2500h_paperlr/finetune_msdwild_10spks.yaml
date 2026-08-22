@@ -1,0 +1,101 @@
+# Stage 3/4: finetune this lineage's 2500h adapt checkpoint
+# (train_10spks.yaml in this directory) on real MSDWild data.
+#
+# NOTHING IS RESCALED IN THIS STAGE, and that is deliberate. The analysis
+# behind this lineage (see train.yaml's header) found the reproduction
+# deficit was confined to the SC pretrain/adapt stages -- the finetune
+# stage was already faithful: the sibling SC_LibriSpeech_2spk_2500h run
+# reached epoch 524 against the paper's shipped checkpoint window of
+# 515-525, on the same optimizer and LR.
+#
+# The requested train_batchsize: 32 also happens to be exactly what the
+# authors' own shipped finetune config uses
+# (../../../../Master/repos/DiaPer/models/10attractors/
+# SC_LibriSpeech_2spk_adapted1-10_finetuneMSDWILD/train.yaml), so there is
+# no batch-vs-LR mismatch to correct here -- Adam at a flat lr: 1e-6 is
+# copied verbatim, as is max_epochs: 750. Table III step I lists this stage
+# as "Adam 10^-6", and Table XIII row (6) -- "(5) + FT 1m", DER 15.5 on
+# MSDWild -- is the exact published number this pipeline targets.
+#
+# num_frames: 600 = 1-minute sequences, matching the "1m" in that Table
+# XIII row. The paper notes MSDWild "reaches the best performance with
+# 1-minute-long sequences since files are less than 1.5 minutes long on
+# average", so do not raise this to match the adapt stage's 2400.
+#
+# early_stopping / early_stopping_patience: 100 is a LOCAL deviation --
+# the authors' config has no such field and --early-stopping does not exist
+# in upstream DiaPer at all. It is kept purely to save compute on a 750-
+# epoch budget. Retained here (rather than dropped in the name of matching
+# the paper) because it was measurably harmless last time: it fired at
+# epoch ~524, inside the paper's own 515-525 selection window.
+#
+# NOTE ON VALIDATION DATA: valid_precomputed_dir is MSDWild's dev split,
+# which is a different speaker-count regime from train/test -- dev is
+# ~97% 5-10-speaker recordings while train and test are both 2-4-speaker
+# only (verified from the RTTMs; Table II of the paper corroborates:
+# MSDWild dev 3-10 spk, test 2-4 spk). So early stopping and checkpoint
+# selection here are driven by a distribution the model is never scored
+# on. This is inherent to the MSDWild benchmark and the paper had the same
+# setup, so it is NOT a reproduction bug -- but it is worth remembering
+# before reading too much into the dev curve.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+early_stopping: true
+early_stopping_patience: 100
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_type: self_attention
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_adapted1-10_2500h_maximum10spks/models
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+latents2attractors: weighted_average
+log_report_batches_num: 10
+lr: 1e-6
+max_epochs: 750
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+norm_loss_per_spk: True
+num_frames: 600
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: adam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_adapted1-10_2500h_maximum10spks/models_finetuneMSDWILD
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 32
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/msdwild_precompute_6000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/msdwild_precompute_6000frames/dev

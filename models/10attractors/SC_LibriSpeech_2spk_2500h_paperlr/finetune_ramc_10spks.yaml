@@ -1,0 +1,93 @@
+# Stage 4/4: finetune this lineage's 2500h adapt checkpoint
+# (train_10spks.yaml in this directory) on real RAMC data.
+#
+# Runs in PARALLEL with finetune_msdwild_10spks.yaml -- both branch off the
+# same stage-2 adapt checkpoint and never write to each other's
+# output_path, so scripts/run_pipeline_2500h_paperlr.sh launches them
+# concurrently on separate GPUs. See that script's header for the device
+# assignment.
+#
+# As with the MSDWild finetune, NOTHING IS RESCALED here: the requested
+# train_batchsize: 32 matches the authors' own shipped finetune config, so
+# Adam at a flat lr: 1e-6 is copied verbatim (Table III step I, "Adam
+# 10^-6"). The reproduction deficit this lineage corrects lives entirely in
+# the SC pretrain/adapt stages -- see train.yaml's header.
+#
+# max_epochs: 500 rather than MSDWild's 750, unchanged from the
+# SC_LibriSpeech_2spk_2500h sibling. The paper's shipped RAMC checkpoint
+# sits at epochs 440-450, comfortably inside this budget.
+#
+# num_frames: 600 (1-minute training sequences) and subsampling: 10 are the
+# TRAINING-time settings and are the same as MSDWild's. Do not confuse them
+# with RAMC's *inference* settings, which differ: infer_ramc.yaml in this
+# directory uses subsampling: 5 and median_window_length: 1, because RAMC
+# is scored at a 0s forgiveness collar. Per Section IV.D, when the collar
+# is 0s the paper applies no median filter and subsamples 5 frames instead
+# of 10 for finer output resolution. MSDWild (0.25s collar) gets the
+# opposite treatment (median 11, subsampling 10). Getting these crossed is
+# an easy and costly mistake -- see CLAUDE.md's "Evaluation" section.
+#
+# early_stopping / early_stopping_patience: 100 is a local compute-saving
+# deviation from the paper, same as the MSDWild finetune -- see that file's
+# header.
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+early_stopping: true
+early_stopping_patience: 100
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_type: self_attention
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_adapted1-10_2500h_maximum10spks/models
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+latents2attractors: weighted_average
+log_report_batches_num: 10
+lr: 1e-6
+max_epochs: 500
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+norm_loss_per_spk: True
+num_frames: 600
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: adam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_adapted1-10_2500h_maximum10spks/models_finetuneRAMC
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 32
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/ramc_precomputed_6000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/ramc_precomputed_6000frames/dev
