@@ -762,7 +762,7 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--frame-encoder-type', default='self_attention',
                         type=str,
                         choices=['self_attention', 'conformer',
-                                 'ebranchformer'],
+                                 'ebranchformer', 'mamba'],
                         help='block type used inside the frame encoder loop')
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--frame-size', type=int)
@@ -822,6 +822,33 @@ def parse_arguments() -> SimpleNamespace:
                         'always-on) behavior for existing configs; set to '
                         '0.0 to drop it entirely, e.g. in favor of '
                         'attractor-diversity-loss-weight instead')
+    parser.add_argument('--mamba-d-conv', default=4, type=int,
+                        help='causal depthwise-conv kernel size inside the '
+                        'mamba frame encoder\'s short local mixing step '
+                        '(only takes effect when '
+                        '--frame-encoder-type=mamba); mamba_ssm\'s default '
+                        'is 4')
+    parser.add_argument('--mamba-d-state', default=16, type=int,
+                        help='SSM state dimension (N) per channel for the '
+                        'mamba frame encoder (only takes effect when '
+                        '--frame-encoder-type=mamba); mamba_ssm\'s default '
+                        'is 16')
+    parser.add_argument('--mamba-dt-rank', default=None, type=int,
+                        help='rank of the low-rank projection used to '
+                        'derive the mamba frame encoder\'s per-step size '
+                        '(delta) from its input; defaults to '
+                        'ceil(d_latents / 16) when unset, matching '
+                        'mamba_ssm\'s own "auto" heuristic (only takes '
+                        'effect when --frame-encoder-type=mamba)')
+    parser.add_argument('--mamba-expand-factor', default=2, type=int,
+                        help='expansion factor for the mamba frame '
+                        'encoder\'s inner SSM width (d_inner = '
+                        'expand_factor * d_latents); only takes effect '
+                        'when --frame-encoder-type=mamba. mamba_ssm\'s '
+                        'default is 2 -- note this makes a MambaBlock much '
+                        'smaller than a same-d_latents ConformerBlock/'
+                        'EBranchformerBlock, see backend/models.py::'
+                        'MambaBlock')
     parser.add_argument('--max-epochs', type=int,
                         help='Max. number of epochs to train')
     parser.add_argument('--min-length', default=0, type=int,

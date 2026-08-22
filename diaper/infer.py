@@ -472,7 +472,7 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--frame-encoder-type', default='self_attention',
                         type=str,
                         choices=['self_attention', 'conformer',
-                                 'ebranchformer'],
+                                 'ebranchformer', 'mamba'],
                         help='block type used inside the frame encoder loop')
     parser.add_argument('--ebranchformer-cgmlp-kernel-size', default=31,
                         type=int,
@@ -540,6 +540,24 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--latents2attractors', type=str, default='linear')
     parser.add_argument('--length-normalize', default=False, type=str2bool)
     parser.add_argument('--log-report-batches-num', default=1, type=float)
+    parser.add_argument('--mamba-d-conv', default=4, type=int,
+                        help='causal depthwise-conv kernel size inside the '
+                        'mamba frame encoder; must match the value the '
+                        'model was trained with')
+    parser.add_argument('--mamba-d-state', default=16, type=int,
+                        help='SSM state dimension (N) per channel for the '
+                        'mamba frame encoder; must match the value the '
+                        'model was trained with')
+    parser.add_argument('--mamba-dt-rank', default=None, type=int,
+                        help='rank of the low-rank projection used to '
+                        'derive the mamba frame encoder\'s per-step size '
+                        '(delta) from its input (defaults to '
+                        'ceil(d_latents / 16) when unset); must match the '
+                        'value the model was trained with')
+    parser.add_argument('--mamba-expand-factor', default=2, type=int,
+                        help='expansion factor for the mamba frame '
+                        'encoder\'s inner SSM width; must match the value '
+                        'the model was trained with')
     parser.add_argument('--median-window-length', default=11, type=int)
     parser.add_argument('--model-type', default='AttractorsPath',
                         help='Type of model (for now only AttractorsPath)')

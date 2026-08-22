@@ -733,6 +733,198 @@ class EBranchformerBlock(torch.nn.Module):
         return self.final_lnorm(x)
 
 
+def _selective_scan(
+    u: torch.Tensor,
+    delta: torch.Tensor,
+    A: torch.Tensor,
+    B_ssm: torch.Tensor,
+    C_ssm: torch.Tensor,
+    D: torch.Tensor,
+) -> torch.Tensor:
+    """ Reference (sequential) selective scan implementing Mamba's S6
+    recurrence:
+        h_t = exp(delta_t * A) * h_{t-1} + delta_t * B_t * u_t
+        y_t = C_t . h_t + D * u_t
+    u, delta: (batch, seq_len, d_inner). A: (d_inner, d_state), always <= 0
+    so the recurrence is stable (the decay exp(delta*A) is in (0, 1]).
+    B_ssm, C_ssm: (batch, seq_len, d_state). D: (d_inner,).
+
+    Loops over seq_len at the Python level -- batch/channel/state axes stay
+    vectorized tensor ops, only the T recurrence itself is sequential. This
+    is the same recurrence the official mamba_ssm package evaluates with a
+    fused CUDA kernel (selective_scan_cuda); here it is plain autograd-able
+    PyTorch instead -- see MambaBlock's docstring for why. deltaA_t/
+    deltaBu_t are computed fresh each step rather than for the whole
+    sequence up front, so peak memory is O(batch * d_inner * d_state)
+    rather than O(batch * seq_len * d_inner * d_state) -- the point of the
+    exercise, since this is meant to make whole-recording (very large
+    seq_len) inference tractable.
+    """
+    batch, seq_len, d_inner = u.shape
+    d_state = A.shape[1]
+    h = u.new_zeros(batch, d_inner, d_state)
+    ys = []
+    for t in range(seq_len):
+        delta_t = delta[:, t]  # (batch, d_inner)
+        deltaA_t = torch.exp(delta_t.unsqueeze(-1) * A)  # (batch, d_inner, d_state)
+        deltaBu_t = (delta_t.unsqueeze(-1) * B_ssm[:, t].unsqueeze(1)
+                     * u[:, t].unsqueeze(-1))  # (batch, d_inner, d_state)
+        h = deltaA_t * h + deltaBu_t
+        ys.append(torch.einsum('bdn,bn->bd', h, C_ssm[:, t]))
+    y = torch.stack(ys, dim=1)  # (batch, seq_len, d_inner)
+    return y + u * D
+
+
+class MambaBlock(torch.nn.Module):
+    """ Mamba (S6 selective-state-space) block, a drop-in alternative to
+    ConformerBlock/EBranchformerBlock for the frame encoder.
+
+    Self-attention (used by all three other frame_encoder_type options,
+    directly or via Conformer/E-Branchformer) is O(T^2) in time and memory.
+    That is what currently blocks whole-recording RAMC inference
+    (--num-frames -1 with --use-frame-selfattention) on this project's 6GB
+    GPU (see --max-input-frames in infer.py). Mamba's selective scan is
+    O(T) in both -- that is the actual motivation for adding it, not raw
+    accuracy.
+
+    This vendors a pure-PyTorch reference scan (_selective_scan above)
+    rather than depending on the official mamba_ssm package: mamba_ssm's
+    speed comes from a custom CUDA kernel (selective_scan_cuda, plus
+    causal_conv1d) shipped only as Linux wheels, and a from-source build
+    needs a matching nvcc toolchain and is known to be unreliable on
+    Windows -- neither fits this project's native-Windows / torch
+    1.11+cu113 environment (see CLAUDE.md's "Environment" section). It is
+    vendored here the same way backend/perceiver.py vendors the Perceiver
+    encoder to avoid an incompatible dependency. This trades throughput (a
+    Python loop over T instead of a fused kernel) for portability; a
+    chunked or parallel-scan formulation would recover speed if the loop
+    proves to be a bottleneck, but is deliberately out of scope here to
+    keep the scan easy to verify against the recurrence it implements (no
+    test suite in this repo -- see CLAUDE.md).
+
+    Block shape (standard Mamba mixer: LayerNorm -> mixer -> residual; no
+    separate macaron FFN like Conformer/E-Branchformer have, since the
+    gated SSM branch already plays that role in the original design):
+        x -> LayerNorm
+          -> in_proj, split into (ssm_input, gate)
+          -> causal depthwise conv1d + SiLU on ssm_input
+          -> x_proj/dt_proj derive input-dependent (delta, B, C)
+          -> selective scan -> gate with SiLU(gate)
+          -> out_proj -> dropout -> residual -> final LayerNorm
+    The trailing final_lnorm is not part of the original Mamba block (which
+    relies on the next block's own leading norm instead); it is added here
+    only so this block's external shape matches ConformerBlock/
+    EBranchformerBlock, which both end in one. AttractorPerceiver's shared
+    self.lnorm_out is applied on top of this either way, same as for the
+    other two types.
+
+    Per-layer parameter count is intentionally NOT matched to Conformer/
+    EBranchformer the way ebranchformer_cgmlp_units was tuned to roughly
+    match ConformerBlock (see that class): with the standard Mamba defaults
+    used here (expand_factor=2, d_state=16, d_conv=4), a block at
+    d_latents=128 has on the order of 0.1M parameters, roughly 10x smaller
+    than a kernel-31 ConformerBlock. Closing that gap via expand_factor
+    alone would need expand_factor ~24, far outside normal Mamba practice
+    (Mamba is designed to be cheap per layer and compensates by stacking
+    more of them, not by inflating a single layer) -- so a fair comparison
+    here means matching total parameter budget via --frame-encoder-layers
+    or reporting parameter counts alongside DER, not forcing this block to
+    Conformer's per-layer size.
+
+    Uses the same flattened (BT, F) + batch_size calling convention as
+    ConformerBlock/EBranchformerBlock so it plugs into AttractorPerceiver's
+    per-layer loop unchanged.
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        d_latents: int,
+        d_state: int,
+        d_conv: int,
+        expand_factor: int,
+        dt_rank: int,
+        dropout: float,
+    ) -> None:
+        super(MambaBlock, self).__init__()
+        assert d_conv >= 1, f"mamba_d_conv must be >= 1, got {d_conv}"
+        self.device = device
+        self.dropout = dropout
+        self.d_state = d_state
+        self.d_inner = expand_factor * d_latents
+        self.dt_rank = dt_rank
+
+        self.norm = torch.nn.LayerNorm(d_latents, device=self.device)
+        self.in_proj = torch.nn.Linear(
+            d_latents, 2 * self.d_inner, bias=False, device=self.device)
+        self.conv1d = torch.nn.Conv1d(
+            self.d_inner, self.d_inner, kernel_size=d_conv,
+            groups=self.d_inner, padding=d_conv - 1, device=self.device)
+        self.x_proj = torch.nn.Linear(
+            self.d_inner, self.dt_rank + 2 * d_state, bias=False,
+            device=self.device)
+        self.dt_proj = torch.nn.Linear(
+            self.dt_rank, self.d_inner, bias=True, device=self.device)
+
+        # dt_proj init: reproduces mamba_ssm's default so softplus(dt_proj(.))
+        # starts inside [1e-3, 1e-1] instead of an arbitrary range. Without
+        # this the SSM tends to either forget its state almost immediately
+        # or barely update it at all -- the same "hard to train without
+        # this init" failure mode already noted on
+        # ConvolutionalSpatialGatingUnit above.
+        dt_init_std = self.dt_rank ** -0.5
+        torch.nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
+        dt = torch.exp(
+            torch.rand(self.d_inner, device=self.device)
+            * (math.log(0.1) - math.log(0.001)) + math.log(0.001)
+        ).clamp(min=1e-4)
+        inv_softplus_dt = dt + torch.log(-torch.expm1(-dt))
+        with torch.no_grad():
+            self.dt_proj.bias.copy_(inv_softplus_dt)
+
+        # A_log/D: S4D-real init (A = -(1..d_state) per channel, stored in
+        # log space since the scan is only stable for A <= 0 and this keeps
+        # it that way for any A_log value the optimizer produces).
+        A_init = torch.arange(
+            1, d_state + 1, dtype=torch.float32, device=self.device
+        ).unsqueeze(0).repeat(self.d_inner, 1)  # (d_inner, d_state)
+        self.A_log = torch.nn.Parameter(torch.log(A_init))
+        self.D = torch.nn.Parameter(
+            torch.ones(self.d_inner, device=self.device))
+
+        self.out_proj = torch.nn.Linear(
+            self.d_inner, d_latents, bias=False, device=self.device)
+        self.final_lnorm = torch.nn.LayerNorm(d_latents, device=self.device)
+
+    def __call__(self, x: torch.Tensor, batch_size: int) -> torch.Tensor:
+        # x: (BT, F)
+        feat_dim = x.shape[-1]
+        seq_len = x.shape[0] // batch_size
+        residual = x.reshape(batch_size, seq_len, feat_dim)
+        x_bt = self.norm(x).reshape(batch_size, seq_len, feat_dim)
+
+        xz = self.in_proj(x_bt)  # (B, T, 2*d_inner)
+        x_in, z = xz.chunk(2, dim=-1)
+
+        x_conv = self.conv1d(x_in.transpose(1, 2))[..., :seq_len]
+        x_conv = F.silu(x_conv.transpose(1, 2))  # (B, T, d_inner)
+
+        x_dbl = self.x_proj(x_conv)
+        delta, B_ssm, C_ssm = torch.split(
+            x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1)
+        delta = F.softplus(self.dt_proj(delta))  # (B, T, d_inner)
+        A = -torch.exp(self.A_log)  # (d_inner, d_state)
+
+        y = _selective_scan(x_conv, delta, A, B_ssm, C_ssm, self.D)
+        y = y * F.silu(z)
+        out = self.out_proj(y)  # (B, T, F)
+        out = F.dropout(out, self.dropout, training=self.training)
+
+        x_bt = residual + out
+        x_bt = self.final_lnorm(x_bt)
+        return x_bt.reshape(-1, feat_dim)  # (BT, F)
+
+
 class PerceiverBlock(torch.nn.Module):
 
     def __init__(
@@ -922,6 +1114,24 @@ class AttractorPerceiver(torch.nn.Module):
                             args.ebranchformer_merge_kernel_size,
                             args.dropout_frames)
                     )
+                elif self.frame_encoder_type == 'mamba':
+                    # dt_rank "auto" (mamba_ssm's own default): ceil(
+                    # d_latents / 16), the same heuristic the official
+                    # implementation uses to size the low-rank projection
+                    # that produces delta from the block's input.
+                    dt_rank = (args.mamba_dt_rank if args.mamba_dt_rank
+                               else math.ceil(args.d_latents / 16))
+                    setattr(
+                        self,
+                        '{}{:d}'.format("mamba_", i),
+                        MambaBlock(
+                            self.device, args.d_latents,
+                            args.mamba_d_state,
+                            args.mamba_d_conv,
+                            args.mamba_expand_factor,
+                            dt_rank,
+                            args.dropout_frames)
+                    )
                 else:
                     setattr(
                         self,
@@ -1099,6 +1309,9 @@ class AttractorPerceiver(torch.nn.Module):
                     e, inputs.shape[0])
             elif self.frame_encoder_type == 'ebranchformer':
                 e = getattr(self, '{}{:d}'.format("ebranchformer_", i))(
+                    e, inputs.shape[0])
+            elif self.frame_encoder_type == 'mamba':
+                e = getattr(self, '{}{:d}'.format("mamba_", i))(
                     e, inputs.shape[0])
             else:
                 # layer normalization
@@ -1325,6 +1538,10 @@ class AttractorPerceiver(torch.nn.Module):
         elif self.frame_encoder_type == 'ebranchformer':
             frame_encoder_modules += [
                 getattr(self, '{}{:d}'.format("ebranchformer_", i))
+                for i in range(self.n_layers)]
+        elif self.frame_encoder_type == 'mamba':
+            frame_encoder_modules += [
+                getattr(self, '{}{:d}'.format("mamba_", i))
                 for i in range(self.n_layers)]
         else:
             frame_encoder_modules += (
