@@ -88,9 +88,17 @@ for run in "${RUNS[@]}"; do
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] finished inference: $name"
 
     median_window_length=$(grep '^median_window_length:' "$cfg" | sed 's/^median_window_length: *//')
-    mapfile -t sys_rttms < <(find "$rttms_dir" -path "*/median${median_window_length}/*.rttm" -type f)
+    # Scoped to this run's own epochs<range>/ dir (see infer.py's out_dir:
+    # rttms_dir/epochs<range>/timeshuffle.../spk_qty..._spk_qty_thr.../
+    # detection_thr.../median<N>/subsampling.../rttms/*.rttm) -- an
+    # unscoped `find "$rttms_dir" -path "*/median.../*.rttm"` would also
+    # match any epochs<other-range>/ left over from an earlier run against
+    # the same rttms_dir (e.g. before more checkpoints landed and widened
+    # the auto-detected range), silently scoring against stale RTTMs.
+    mapfile -t sys_rttms < <(find "$rttms_dir/epochs${epochs_range}" \
+        -path "*/median${median_window_length}/*/rttms/*.rttm" -type f)
     if [ "${#sys_rttms[@]}" -eq 0 ]; then
-        echo "  WARNING: no .rttm files found under $rttms_dir (median${median_window_length}), skipping scoring"
+        echo "  WARNING: no .rttm files found under $rttms_dir/epochs${epochs_range} (median${median_window_length}), skipping scoring"
         continue
     fi
 
