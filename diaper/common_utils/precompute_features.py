@@ -433,7 +433,7 @@ def _get_worker_data(data_dir: str) -> KaldiData:
     return _worker_data_cache[data_dir]
 
 
-def process_one(
+def _compute_chunk(
     idx_chunk,
     data_dir: str,
     frame_size: int,
@@ -442,7 +442,6 @@ def process_one(
     sampling_rate: int,
     feature_dim: int,
     input_transform: str,
-    output_dir: str,
 ):
     idx, (rec, st, ed) = idx_chunk
     data = _get_worker_data(data_dir)
@@ -459,13 +458,85 @@ def process_one(
             Y, sampling_rate, feature_dim, input_transform,
             specaugment=False)
 
+    return idx, {'Y': Y_t, 'T': T, 'rec': rec, 'st': st, 'ed': ed,
+                 'speaker_ids': speaker_ids}
+
+
+def process_one_perfile(idx_chunk, output_dir: str, **compute_kwargs):
+    """storage-format=perfile: each worker writes its own chunk straight
+    to disk (embarrassingly parallel, no coordination needed)."""
+    idx, d = _compute_chunk(idx_chunk, **compute_kwargs)
     out_path = os.path.join(output_dir, f"{idx:08d}.pkl")
     with open(out_path, 'wb') as f:
-        pickle.dump(
-            {'Y': Y_t, 'T': T, 'rec': rec, 'st': st, 'ed': ed,
-             'speaker_ids': speaker_ids},
-            f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(d, f, protocol=pickle.HIGHEST_PROTOCOL)
     return idx
+
+
+def process_one_shard_blob(idx_chunk, **compute_kwargs):
+    """storage-format=shard: workers only compute + serialize; the main
+    process is the single writer that packs blobs into shard files (see
+    main()), so chunk order within a shard is deterministic and shard
+    files stay few and large -- friendly to network/parallel filesystems
+    (e.g. Lustre) where many small-file opens, not raw throughput, are
+    the bottleneck."""
+    idx, d = _compute_chunk(idx_chunk, **compute_kwargs)
+    blob = pickle.dumps(d, protocol=pickle.HIGHEST_PROTOCOL)
+    return idx, blob
+
+
+class ShardWriter:
+    """Packs many small chunk blobs into a handful of large sequential
+    files (shard_00000.bin, shard_00001.bin, ...) plus a byte-offset
+    index, so a network/parallel filesystem (e.g. Lustre) pays its
+    metadata-server open() cost O(#shards) per run instead of
+    O(#chunks) -- the actual bottleneck many-small-file caches hit
+    there, not raw read throughput. Shards are only opened once there
+    is a blob to put in them, so a chunk count that divides evenly by
+    chunks_per_shard never leaves a trailing empty shard file."""
+
+    def __init__(self, output_dir: str, chunks_per_shard: int, total: int):
+        self.output_dir = output_dir
+        self.chunks_per_shard = chunks_per_shard
+        self.locations = [None] * total
+        self.shard_idx = -1
+        self.count_in_shard = 0
+        self.offset = 0
+        self.f = None
+
+    def _open_next_shard(self):
+        if self.f is not None:
+            self.f.close()
+        self.shard_idx += 1
+        self.count_in_shard = 0
+        self.offset = 0
+        self.f = open(os.path.join(
+            self.output_dir, f"shard_{self.shard_idx:05d}.bin"), 'wb')
+
+    def write(self, idx: int, blob: bytes):
+        if self.f is None or self.count_in_shard == self.chunks_per_shard:
+            self._open_next_shard()
+        self.f.write(blob)
+        self.locations[idx] = (
+            f"shard_{self.shard_idx:05d}.bin", self.offset, len(blob))
+        self.offset += len(blob)
+        self.count_in_shard += 1
+
+    def close(self):
+        if self.f is not None:
+            self.f.close()
+            self.f = None
+
+
+def _run_pool(worker_fn, items, num_workers: int):
+    """Yields worker_fn(item) results, parallel via Pool.imap_unordered
+    if num_workers > 1 else serially -- same result stream either way,
+    so callers don't need to branch on num_workers themselves."""
+    if num_workers > 1:
+        with Pool(num_workers) as pool:
+            yield from pool.imap_unordered(worker_fn, items)
+    else:
+        for item in items:
+            yield worker_fn(item)
 
 
 def main():
@@ -509,6 +580,30 @@ def main():
                               "never precomputed, always applied fresh "
                               "at load time")
     parser.add_argument('--num-workers', type=int, default=1)
+    parser.add_argument('--storage-format', choices=['perfile', 'shard'],
+                         default='perfile',
+                         help="'perfile' (default): one .pkl per chunk -- "
+                              "simple, and fine when precomputed_dir is on "
+                              "local/NVMe disk. 'shard': packs "
+                              "--chunks-per-shard chunks into each of a "
+                              "handful of shard_NNNNN.bin files instead. "
+                              "Use this when precomputed_dir lives on a "
+                              "network/parallel filesystem (NFS, Lustre, "
+                              "...) -- there, opening ~one file per chunk "
+                              "per epoch (hundreds of thousands of opens "
+                              "for a large SC corpus) hits the metadata "
+                              "server, not disk throughput, and that "
+                              "bottleneck shows up as wildly inconsistent "
+                              "epoch times shared-tenant to shared-tenant "
+                              "regardless of GPU speed. Both formats are "
+                              "read transparently by "
+                              "PrecomputedKaldiDiarizationDataset, "
+                              "auto-detected from meta.pkl -- no train/"
+                              "infer-side flag needed. See also "
+                              "pack_shards.py to convert an existing "
+                              "perfile cache without recomputing features.")
+    parser.add_argument('--chunks-per-shard', type=int, default=1000,
+                         help="only used when --storage-format=shard")
     parser.add_argument('--tail-subsampling', type=int, default=None,
                          help="ONLY for exact-match verification against "
                               "KaldiDiarizationDataset(subsampling=S). "
@@ -544,39 +639,67 @@ def main():
         'min_length': args.min_length,
         'tail_subsampling': args.tail_subsampling,
         'chunk_indices': chunk_indices,
+        'storage_format': args.storage_format,
         # chunk_size above is raw-frame domain; subsampling is applied
         # freely at load time and is NOT recorded/enforced here.
     }
-    with open(os.path.join(args.output_dir, 'meta.pkl'), 'wb') as f:
-        pickle.dump(meta, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-    worker_fn = partial(
-        process_one,
-        data_dir=args.data_dir,
-        frame_size=args.frame_size,
-        frame_shift=args.frame_shift,
-        n_speakers=args.n_speakers,
-        sampling_rate=args.sampling_rate,
-        feature_dim=args.feature_dim,
-        input_transform=args.input_transform,
-        output_dir=args.output_dir,
-    )
 
     items = list(enumerate(chunk_indices))
     total = len(items)
 
-    if args.num_workers > 1:
-        with Pool(args.num_workers) as pool:
-            for done, _ in enumerate(pool.imap_unordered(worker_fn, items), 1):
-                if done % 200 == 0 or done == total:
-                    logging.info(f"Processed {done}/{total}")
-    else:
-        for done, item in enumerate(items, 1):
-            worker_fn(item)
+    if args.storage_format == 'perfile':
+        # No further meta fields needed -- write it now (same timing as
+        # before this flag existed), so tools can inspect chunk_indices
+        # while a long precompute run is still in progress.
+        with open(os.path.join(args.output_dir, 'meta.pkl'), 'wb') as f:
+            pickle.dump(meta, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        worker_fn = partial(
+            process_one_perfile,
+            output_dir=args.output_dir,
+            data_dir=args.data_dir,
+            frame_size=args.frame_size,
+            frame_shift=args.frame_shift,
+            n_speakers=args.n_speakers,
+            sampling_rate=args.sampling_rate,
+            feature_dim=args.feature_dim,
+            input_transform=args.input_transform,
+        )
+        for done, _ in enumerate(
+                _run_pool(worker_fn, items, args.num_workers), 1):
             if done % 200 == 0 or done == total:
                 logging.info(f"Processed {done}/{total}")
 
-    logging.info(f"Done. Wrote {total} chunks to {args.output_dir}")
+        logging.info(f"Done. Wrote {total} chunks to {args.output_dir}")
+    else:
+        # chunk_locations is only known once every blob has been placed
+        # into a shard, so meta.pkl is written AFTER the loop below.
+        worker_fn = partial(
+            process_one_shard_blob,
+            data_dir=args.data_dir,
+            frame_size=args.frame_size,
+            frame_shift=args.frame_shift,
+            n_speakers=args.n_speakers,
+            sampling_rate=args.sampling_rate,
+            feature_dim=args.feature_dim,
+            input_transform=args.input_transform,
+        )
+        writer = ShardWriter(args.output_dir, args.chunks_per_shard, total)
+        for done, (idx, blob) in enumerate(
+                _run_pool(worker_fn, items, args.num_workers), 1):
+            writer.write(idx, blob)
+            if done % 200 == 0 or done == total:
+                logging.info(f"Processed {done}/{total}")
+        writer.close()
+
+        meta['chunks_per_shard'] = args.chunks_per_shard
+        meta['chunk_locations'] = writer.locations
+        with open(os.path.join(args.output_dir, 'meta.pkl'), 'wb') as f:
+            pickle.dump(meta, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        logging.info(
+            f"Done. Wrote {total} chunks into {writer.shard_idx + 1} "
+            f"shard file(s) in {args.output_dir}")
 
 
 if __name__ == '__main__':

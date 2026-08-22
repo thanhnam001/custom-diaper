@@ -18,6 +18,13 @@
 # chunk_indices exist, so they're kept per-source as lists in the merged
 # meta purely for provenance.
 #
+# storage_format=shard inputs are rejected (see main()): place_chunk()
+# below assumes one {idx:08d}.pkl file per chunk, which shard-format dirs
+# don't have (chunks live at byte offsets inside a handful of shard_*.bin
+# files instead). Merge perfile sources first with this script, then run
+# pack_shards.py once on the merged, still-perfile output if you want a
+# sharded result.
+#
 # No project imports needed -- this only moves/copies pickle files, it
 # doesn't touch audio or features.
 
@@ -89,6 +96,17 @@ def main():
                          format='%(asctime)s %(levelname)s %(message)s')
 
     metas = [load_meta(d) for d in args.input_dirs]
+
+    for src_dir, meta in zip(args.input_dirs, metas):
+        storage_format = meta.get('storage_format', 'perfile')
+        if storage_format != 'perfile':
+            raise ValueError(
+                f"{src_dir} is storage_format={storage_format!r} -- "
+                "merge_precomputed_features.py only merges perfile dirs "
+                "(it copies individual {idx:08d}.pkl files, which "
+                "shard-format dirs don't have). Merge the perfile sources "
+                "first, then run pack_shards.py once on the merged output "
+                "if you want a sharded result.")
 
     reference_dir, reference = args.input_dirs[0], metas[0]
     for src_dir, meta in zip(args.input_dirs[1:], metas[1:]):

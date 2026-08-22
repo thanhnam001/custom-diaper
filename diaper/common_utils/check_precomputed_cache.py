@@ -33,6 +33,30 @@ except ImportError:
         pass
 
 
+# path -> open file handle, reused across chunks of the same shard within
+# one check(d) call. Duplicated from precomputed_diarization_dataset.py's
+# _get_shard_file (see that module for why lazy-per-process open matters
+# under DataLoader multiprocessing) -- irrelevant here since this script
+# is single-process, but kept as one open handle per shard instead of
+# reopening per chunk purely for speed.
+_shard_cache = {}
+
+
+def _load_chunk(d: str, meta: dict, i: int):
+    if meta.get('storage_format', 'perfile') == 'shard':
+        shard_name, offset, length = meta['chunk_locations'][i]
+        path = os.path.join(d, shard_name)
+        f = _shard_cache.get(path)
+        if f is None:
+            f = open(path, 'rb')
+            _shard_cache[path] = f
+        f.seek(offset)
+        return pickle.loads(f.read(length))
+    path = os.path.join(d, f"{i:08d}.pkl")
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
+
 def check(d: str) -> bool:
     print(f"\n=== {d} ===")
     meta_path = os.path.join(d, 'meta.pkl')
@@ -42,30 +66,47 @@ def check(d: str) -> bool:
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
     ci = meta['chunk_indices']
+    storage_format = meta.get('storage_format', 'perfile')
     print(f"meta: n_speakers={meta.get('n_speakers')} "
           f"chunk_size={meta.get('chunk_size')} "
           f"feature_dim={meta.get('feature_dim')} "
           f"input_transform={meta.get('input_transform')} "
           f"tail_subsampling={meta.get('tail_subsampling')} "
+          f"storage_format={storage_format} "
           f"#chunks={len(ci)}")
 
-    pkls = [f for f in os.listdir(d)
-            if f.endswith('.pkl') and f != 'meta.pkl']
-    if len(pkls) != len(ci):
-        print(f"FAIL: meta lists {len(ci)} chunks but directory has "
-              f"{len(pkls)} chunk pkls")
-        return False
+    if storage_format == 'shard':
+        locs = meta.get('chunk_locations')
+        if locs is None or len(locs) != len(ci):
+            got = 'missing' if locs is None else len(locs)
+            print(f"FAIL: meta storage_format=shard but chunk_locations "
+                  f"length ({got}) != #chunks ({len(ci)})")
+            return False
+        shard_names = sorted(set(name for name, _, _ in locs))
+        missing_shards = [s for s in shard_names
+                           if not os.path.isfile(os.path.join(d, s))]
+        if missing_shards:
+            print(f"FAIL: {len(missing_shards)} shard file(s) referenced "
+                  f"in meta are missing, e.g. {missing_shards[:5]}")
+            return False
+        print(f"shard files: {len(shard_names)}")
+    else:
+        pkls = [f for f in os.listdir(d)
+                if f.endswith('.pkl') and f != 'meta.pkl']
+        if len(pkls) != len(ci):
+            print(f"FAIL: meta lists {len(ci)} chunks but directory has "
+                  f"{len(pkls)} chunk pkls")
+            return False
 
     n_empty, n_nonfinite, n_zero_labels, n_index_mismatch = 0, 0, 0, 0
     empty_examples, frames, act_fracs = [], [], []
     y_means, y_stds = [], []
     for i in range(len(ci)):
-        path = os.path.join(d, f"{i:08d}.pkl")
-        if not os.path.isfile(path):
-            print(f"FAIL: missing chunk file {path}")
+        try:
+            c = _load_chunk(d, meta, i)
+        except (FileNotFoundError, EOFError, pickle.UnpicklingError) as e:
+            print(f"FAIL: could not load chunk {i}: {e}")
             return False
-        with open(path, 'rb') as f:
-            c = pickle.load(f)
         Y, T = c['Y'], c['T']
         rec, st, ed = ci[i]
         if (c['rec'], c['st'], c['ed']) != (rec, st, ed):

@@ -23,6 +23,37 @@ import diaper.common_utils.features as features
 import diaper.common_utils.numpy2_pickle_compat  # noqa: F401
 
 
+# DataLoader workers are separate OS processes. A file object opened in
+# the main process before they fork shares its underlying seek position
+# across all of them (POSIX fork semantics) -- concurrent seek+read from
+# different workers would then race and corrupt reads. So shard file
+# handles are opened lazily, on first access from whichever process
+# needs them, and cached per-process here (mirrors the
+# _get_worker_data pattern in precompute_features.py). Each worker ends
+# up with its own handle per shard, opened once and reused for the rest
+# of the run (persistent_workers=True keeps it alive across epochs too).
+#
+# The cache is keyed on (path, pid) rather than just path so that a
+# handle opened by a parent process before a fork is never handed to a
+# forked child just because the child inherited the (already-populated)
+# dict via copy-on-write -- a pid mismatch forces that child to open its
+# own independent handle instead of reusing the parent's shared-offset
+# one. This only bites if something indexes the dataset directly before
+# DataLoader workers are spawned (num_workers=0 access, e.g.), so it
+# would otherwise be an easy-to-miss latent race rather than one that
+# reliably shows up in testing.
+_shard_file_cache: dict = {}
+
+
+def _get_shard_file(path: str):
+    key = (path, os.getpid())
+    f = _shard_file_cache.get(key)
+    if f is None:
+        f = open(path, 'rb')
+        _shard_file_cache[key] = f
+    return f
+
+
 def _apply_specaugment(Y: np.ndarray) -> np.ndarray:
     """Mirrors the specaugment branch at the tail of features.transform()."""
     timemasking = T.TimeMasking(time_mask_param=80)
@@ -53,12 +84,19 @@ class PrecomputedKaldiDiarizationDataset(torch.utils.data.Dataset):
         with open(meta_path, 'rb') as f:
             self.meta = pickle.load(f)
         self.chunk_indices = self.meta['chunk_indices']
+        # Absent in caches written before storage_format existed -- those
+        # are all 'perfile' (one {i:08d}.pkl per chunk), so that's the
+        # backward-compatible default.
+        self.storage_format = self.meta.get('storage_format', 'perfile')
+        if self.storage_format == 'shard':
+            self.chunk_locations = self.meta['chunk_locations']
 
         logging.info(
             f"Loaded precomputed dataset from {precomputed_dir}: "
             f"#chunks: {len(self.chunk_indices)} "
             f"(feature_dim={self.meta['feature_dim']}, "
-            f"input_transform={self.meta['input_transform']})")
+            f"input_transform={self.meta['input_transform']}, "
+            f"storage_format={self.storage_format})")
 
         self.saved = None  # used in case of empty sequence, like the original
 
@@ -66,9 +104,15 @@ class PrecomputedKaldiDiarizationDataset(torch.utils.data.Dataset):
         return len(self.chunk_indices)
 
     def _load_chunk(self, i: int):
-        path = os.path.join(self.precomputed_dir, f"{i:08d}.pkl")
-        with open(path, 'rb') as f:
-            d = pickle.load(f)
+        if self.storage_format == 'shard':
+            shard_name, offset, length = self.chunk_locations[i]
+            f = _get_shard_file(os.path.join(self.precomputed_dir, shard_name))
+            f.seek(offset)
+            d = pickle.loads(f.read(length))
+        else:
+            path = os.path.join(self.precomputed_dir, f"{i:08d}.pkl")
+            with open(path, 'rb') as f:
+                d = pickle.load(f)
         return d['Y'], d['T'], d['rec'], d['st'], d['ed'], d['speaker_ids']
 
     def __getitem__(self, i: int) -> Tuple[np.ndarray, np.ndarray]:

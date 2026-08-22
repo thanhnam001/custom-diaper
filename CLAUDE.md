@@ -232,10 +232,29 @@ frame-encoder layer / Perceiver block when intermediate supervision is on
   This file has its **own copy** of `KaldiData`/`load_wav_scp`/`stft`/etc.
   duplicated from `kaldi_data.py`/`features.py` rather than importing them —
   be aware when fixing bugs in one that the other likely needs the same fix.
+  `--storage-format` chooses the on-disk layout of the cache it writes:
+  `perfile` (default) writes one `{i:08d}.pkl` per chunk — simple, fine on
+  local/NVMe disk. `shard` instead packs `--chunks-per-shard` chunks (default
+  1000) into each of a handful of `shard_NNNNN.bin` files plus a byte-offset
+  index in `meta.pkl`. Use `shard` when `precomputed_dir` lives on a network/
+  parallel filesystem (NFS, Lustre, etc., e.g. a RunAI pod with no local
+  NVMe) — there, a large SC corpus chunked into hundreds of thousands of
+  files means the DataLoader opens ~one file per chunk per epoch, which
+  hits the metadata server rather than disk throughput and shows up as
+  epoch times that vary wildly with other tenants' load, independent of GPU
+  speed. `common_utils/pack_shards.py` converts an existing `perfile` cache
+  to `shard` **without recomputing features** (byte-copies each already-
+  serialized chunk into shards) and spot-verifies the result before you
+  delete the original — use it rather than re-running precompute from
+  scratch on an expensive existing cache.
 - `precomputed_diarization_dataset.py::PrecomputedKaldiDiarizationDataset`:
   drop-in replacement for `KaldiDiarizationDataset` that reads the precomputed
   cache and applies splice/subsample/specaugment/top-N-speaker-selection at
   load time, so those stay free-to-change knobs without re-running precompute.
+  Reads either `storage_format` transparently, auto-detected from
+  `meta.pkl` (missing key = `perfile`, for caches written before this
+  existed) — no train/infer-side flag needed, just point
+  `--*-precomputed-dir` at whichever cache directory you want.
 - `verify.py` (repo root) cross-checks the two datasets produce identical
   output for equivalent configs — read its module docstring before using it,
   the `chunk_size`/`subsampling` translation between the two datasets is easy
