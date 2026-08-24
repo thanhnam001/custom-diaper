@@ -120,6 +120,7 @@ def make_client(args):
         endpoint_url=args.endpoint_url,
         aws_access_key_id=args.access_key or os.environ.get("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=args.secret_key or os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        region_name=args.region,
         config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 10}),
         verify=not args.no_verify_ssl,
     )
@@ -226,6 +227,7 @@ def parse_arguments():
     common.add_argument("--key", required=True, help="path to the .tar object within the bucket")
     common.add_argument("--access-key", default=None)
     common.add_argument("--secret-key", default=None)
+    common.add_argument("--region", default=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"), help="required for SigV4 signing even against self-hosted S3 that ignores its value")
     common.add_argument("--no-verify-ssl", action="store_true")
     common.add_argument("--index-cache", required=True, help="local JSON path to write/read the member index")
 
