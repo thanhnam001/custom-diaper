@@ -44,8 +44,31 @@
 # capacity. Setting it to frame_encoder_units (2048) instead would make it
 # 1.72x, which would confound the comparison; raise it only deliberately.
 #
+# LOSS COMPOSITION: mlp + diversity, NOT weighted_average + l2a entropy
+# -----------------------------------------------------------------------
+# This lineage does NOT inherit the paperlr baseline's
+# latents2attractors: weighted_average. It instead follows
+# SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h (the "Conformer
+# base (mlp + conv_kernel_31 + diversity)" recipe): latents2attractors:
+# mlp from stage 1 onward, with attractor_diversity_loss_weight: 0.1
+# (masked) active from the start, so mlp's attractor-vector separation is
+# never a variable stage 2 has to fight into an already-collapsed
+# checkpoint. l2a_entropy_loss_weight is explicitly set to 0.0 rather than
+# left at its default 1.0 -- it is a no-op for latents2attractors: mlp
+# regardless (see train.py's docstring for that arg), but the explicit 0.0
+# documents that this lineage does not want it active even incidentally,
+# and keeps every stage of the lineage consistent since a later change to
+# latents2attractors would otherwise silently reactivate it.
+#
+# This is a deliberate divergence from the paperlr baseline (which uses
+# weighted_average throughout, matching the paper's own architecture) --
+# the point of this lineage is E-Branchformer combined with the
+# collapse-resistant mlp + diversity loss composition, with the Noam
+# schedule below carried over unchanged from the paperlr correction.
+#
 # ---------------------------------------------------------------------
-# Everything below is inherited verbatim from the paperlr baseline:
+# Everything below (other than latents2attractors and the two loss
+# weights just discussed) is inherited verbatim from the paperlr baseline:
 # ---------------------------------------------------------------------
 #
 # Stage 1/4: pretrain on 2-speaker LibriSpeech-simulated conversations, at
@@ -127,11 +150,11 @@
 # files on 2 different machines. Explicit values are identical on every
 # resume, which is also exactly what the paper's own configs do.
 #
-# Everything else -- architecture (self_attention frame encoder,
-# latents2attractors: weighted_average), loss weights, num_frames: 600
-# (1-minute sequences), max_epochs: 100 -- is unchanged from
-# SC_LibriSpeech_2spk_2500h/train.yaml so that the Noam schedule and batch
-# size are the only variables between the two lineages.
+# Everything else -- num_frames: 600 (1-minute sequences), max_epochs: 100
+# -- is unchanged from SC_LibriSpeech_2spk_2500h/train.yaml so that the
+# Noam schedule and batch size are the only variables between the two
+# lineages (latents2attractors and the diversity/l2a-entropy weights are
+# the deliberate exception, per "LOSS COMPOSITION" above).
 #
 # Data: same 2500h 2-speaker SC precompute as the sibling lineage. Note the
 # paper's SC path carries a --no-use-energies suffix ours does not; that
@@ -144,6 +167,7 @@ activation_loss_BCE_weight: 1.0
 activation_loss_DER_weight: 0.0
 attractor_existence_loss_weight: 1.0
 attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
 condition_frame_encoder: True
 context_size: 7
 d_latents: 128
@@ -164,7 +188,8 @@ gradclip: 5
 input_transform: logmel_meannorm
 intermediate_loss_frameencoder: True
 intermediate_loss_perceiver: True
-latents2attractors: weighted_average
+l2a_entropy_loss_weight: 0.0
+latents2attractors: mlp
 log_report_batches_num: 256
 max_epochs: 100
 model_type: AttractorPerceiver
@@ -183,7 +208,7 @@ num_speakers: 2
 num_workers: 4
 num_threads: 1
 optimizer: noam
-output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_pretrain2500h
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_pretrain2500h_mlp
 pre_xa_heads: 4
 sampling_rate: 16000
 seed: 3

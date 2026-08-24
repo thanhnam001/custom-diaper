@@ -30,12 +30,19 @@
 # early_stopping / early_stopping_patience: 100 is a local compute-saving
 # deviation from the paper, same as the MSDWild finetune -- see that file's
 # header.
+#
+# LOSS COMPOSITION: this stage carries forward latents2attractors: mlp,
+# attractor_diversity_loss_weight: 0.1, l2a_entropy_loss_weight: 0.0 and
+# intermediate_loss_perceiver: False from train_10spks.yaml unchanged --
+# see train.yaml's "LOSS COMPOSITION" section and
+# finetune_msdwild_10spks.yaml's matching note.
 
 # training options
 activation_loss_BCE_weight: 1.0
 activation_loss_DER_weight: 0.0
 attractor_existence_loss_weight: 1.0
 attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
 condition_frame_encoder: True
 context_size: 7
 d_latents: 128
@@ -56,11 +63,12 @@ use_last_samples: True
 gpu: 1
 gradclip: 5
 init_epochs: 90-100
-init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks/models
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models
 input_transform: logmel_meannorm
 intermediate_loss_frameencoder: True
-intermediate_loss_perceiver: True
-latents2attractors: weighted_average
+intermediate_loss_perceiver: False
+l2a_entropy_loss_weight: 0.0
+latents2attractors: mlp
 log_report_batches_num: 10
 lr: 1e-6
 max_epochs: 500
@@ -78,7 +86,7 @@ num_speakers: 10
 num_workers: 4
 num_threads: 1
 optimizer: adam
-output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks/models_finetuneRAMC
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneRAMC
 pre_xa_heads: 4
 sampling_rate: 16000
 seed: 3

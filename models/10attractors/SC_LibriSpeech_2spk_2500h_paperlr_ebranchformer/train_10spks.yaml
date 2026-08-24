@@ -7,6 +7,18 @@
 # stage, with one deliberate difference in how peak LR is chosen -- see
 # below.
 #
+# LOSS COMPOSITION carried forward from train.yaml's stage-1 checkpoint:
+# latents2attractors: mlp, attractor_diversity_loss_weight: 0.1,
+# l2a_entropy_loss_weight: 0.0 (see train.yaml's "LOSS COMPOSITION"
+# section for why). intermediate_loss_perceiver is turned off here (True
+# at stage 1, False here), matching
+# SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h/train_10spks_mlp.
+# yaml's stage-2 config -- the 3 PerceiverEncoders are chained
+# sequentially with a single shared existence head across blocks, so deep
+# supervision at every block fights the same shared-weight gradient
+# conflict the mlp/diversity change is meant to relieve on the slot axis
+# (see that reference file's header for the fuller argument).
+#
 # NOAM PARAMETERS FOR train_batchsize: 22
 # ---------------------------------------
 # 2500h of 4-minute chunks at batch 22 is ~904 steps/epoch (derived from
@@ -63,6 +75,7 @@ activation_loss_BCE_weight: 1.0
 activation_loss_DER_weight: 0.0
 attractor_existence_loss_weight: 1.0
 attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
 condition_frame_encoder: True
 context_size: 7
 d_latents: 128
@@ -81,11 +94,12 @@ use_last_samples: True
 gpu: 1
 gradclip: 5
 init_epochs: 90-100
-init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_pretrain2500h/models
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_pretrain2500h_mlp/models
 input_transform: logmel_meannorm
 intermediate_loss_frameencoder: True
-intermediate_loss_perceiver: True
-latents2attractors: weighted_average
+intermediate_loss_perceiver: False
+l2a_entropy_loss_weight: 0.0
+latents2attractors: mlp
 log_report_batches_num: 24
 max_epochs: 100
 model_type: AttractorPerceiver
@@ -104,7 +118,7 @@ num_speakers: 10
 num_workers: 4
 num_threads: 1
 optimizer: noam
-output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp
 pre_xa_heads: 4
 sampling_rate: 16000
 seed: 3

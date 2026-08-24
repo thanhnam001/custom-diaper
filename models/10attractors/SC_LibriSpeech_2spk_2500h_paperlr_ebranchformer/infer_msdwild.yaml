@@ -3,8 +3,9 @@
 #
 # Architecture options must stay in sync with train.yaml /
 # train_10spks.yaml / finetune_msdwild_10spks.yaml in this directory
-# (self_attention frame encoder, latents2attractors: weighted_average --
-# the paper's own baseline). The Noam-schedule changes that define this
+# (ebranchformer frame encoder, latents2attractors: mlp -- see train.yaml's
+# "LOSS COMPOSITION" section for why this lineage does not use the paper's
+# weighted_average baseline). The Noam-schedule changes that define this
 # lineage are training-time only and have no inference-side counterpart.
 #
 # median_window_length: 11 / subsampling: 10 follow the paper's
@@ -43,10 +44,10 @@ frame_size: 400
 gpu: 1
 infer_data_dir: /data/ocr/namvt17/dataset/diarization/msdwild/kaldi/test
 input_transform: logmel_meannorm
-latents2attractors: weighted_average
+latents2attractors: mlp
 median_window_length: 11
 model_type: AttractorPerceiver
-models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks/models_finetuneMSDWILD/models
+models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneMSDWILD/models
 n_attractors: 10
 n_blocks_attractors: 3
 n_internal_blocks_attractors: 1
@@ -57,7 +58,7 @@ n_xa_heads_attractors: 4
 num_frames: -1
 num_speakers: 10
 pre_xa_heads: 4
-rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks/models_finetuneMSDWILD/msdwild_test_pred
+rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneMSDWILD/msdwild_test_pred
 sampling_rate: 16000
 seed: 3
 subsampling: 10
