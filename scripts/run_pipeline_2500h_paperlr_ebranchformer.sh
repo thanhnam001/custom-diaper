@@ -1,5 +1,13 @@
 #!/bin/bash
 set -e
+set -o pipefail
+
+# NOTE: pipefail matters here specifically because run_stage() pipes
+# through `tee` -- `cmd | tee file` on its own reports tee's exit status,
+# not cmd's, so `set -e` alone would NOT stop the pipeline if a
+# `python diaper/train.py` stage crashed or OOM'd partway through: the
+# script would silently continue to the next stage using whatever
+# (possibly incomplete) checkpoint that stage left behind.
 
 # Runs the SC_LibriSpeech_2spk_2500h_paperlr_ebranchformer recipe
 # end-to-end, one stage after another (pretrain -> adapt -> finetune
