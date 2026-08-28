@@ -472,8 +472,12 @@ lane () {
         # Second LR point. Last in the queue on purpose -- if the box is
         # slower than the calibration gate assumed, this is the item that
         # should fall off the end.
-        train_stage "L${L} F2 finetune RAMC @ lr 1e-5" "$GPU"             "$CFG/finetune_ramc_10spks.yaml" "$P/7_f2_ft_ramc_lr1e-5.log"             --lr 1e-5 --output-path "${ft_ramc_out}_lr1e-5"
-        ramc_infer_bg "L${L} F2 RAMC lr1e-5" "$CFG/infer_ramc.yaml"             "${ft_ramc_out}_lr1e-5/models" "${ft_ramc_out}_lr1e-5/ramc_test_pred"             1 "" "$P/7_f2_ft_ramc_lr1e-5_infer.log" "$JOBS"
+        train_stage "L${L} F2 finetune RAMC @ lr 1e-5" "$GPU" \
+            "$CFG/finetune_ramc_10spks.yaml" "$P/7_f2_ft_ramc_lr1e-5.log" \
+            --lr 1e-5 --output-path "${ft_ramc_out}_lr1e-5"
+        ramc_infer_bg "L${L} F2 RAMC lr1e-5" "$CFG/infer_ramc.yaml" \
+            "${ft_ramc_out}_lr1e-5/models" "${ft_ramc_out}_lr1e-5/ramc_test_pred" \
+            1 "" "$P/7_f2_ft_ramc_lr1e-5_infer.log" "$JOBS"
     fi
 
     # -- wait for this lane's background RAMC scorings ----------------------
