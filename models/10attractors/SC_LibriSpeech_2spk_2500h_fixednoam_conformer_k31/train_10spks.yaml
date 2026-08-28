@@ -1,0 +1,137 @@
+# Stage 2/4: adapt the 2500h 2-speaker conformer pretrain to 1-10 speakers,
+# ON THE CORRECTED NOAM SCHEDULE. This is experiment B1 of the five-day
+# queue.
+#
+# Source lineage: SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_
+# spkcounting_headoff -- conformer k31 + latents2attractors: mlp +
+# attractor_diversity_loss_weight: 0.1, with the speaker-counting head OFF.
+# That is the best conformer on record: RAMC test 23.71 / MSDWild 18.12.
+#
+# NOTE ON results.csv ROW 24: it is labelled "+ diversity + overlaploss_3",
+# but the headoff config carries no overlap_loss_weight at all. The only
+# runs that really used overlap_loss_weight: 3.0 are the ones with the
+# counting head ON (row 23: RAMC 24.08 / MSDWild 22.43, the worst MSDWild
+# number in the lineage). Overlap-loss-3 therefore has no clean evidence
+# behind it and is deliberately NOT carried into this lineage.
+#
+# WHY THIS LINEAGE EXISTS
+# -----------------------
+# Every conformer / E-Branchformer run in results.csv (rows 21-25) was
+# trained with noam_warmup_fraction: 0.10 -- the deficient schedule whose
+# correction, on the otherwise-unchanged vanilla model, moved RAMC test DER
+# 23.85 -> 20.80 (results.csv row 20; see
+# models/10attractors/SC_LibriSpeech_2spk_2500h_paperlr/train.yaml for the
+# full derivation and MEMORY.md's diaper-paperlr-noam-fix). The
+# architecture runs were hit HARDER than vanilla was: they ran 4-GPU DDP
+# with per-rank batches, so their optimiser took ~2.5-2.9x fewer steps than
+# a single-GPU run over the same data, while noam_warmup_fraction silently
+# re-derived itself from the shortened per-rank loader.
+#
+# So the architecture-vs-vanilla comparison has never been run on a correct
+# schedule, and "the conformers lose to vanilla" is not yet an established
+# fact. This lineage changes exactly one thing versus its source lineage:
+# the Noam schedule, made explicit (never fraction-based -- fractions are
+# not resume-stable) and given the paper's 53.7% ramp fraction at the batch
+# size a single V100 can hold.
+#
+# NOAM PARAMETERS FOR train_batchsize: 16 ON ONE GPU
+# ---------------------------------------------------
+# 2500h of 4-minute chunks is 19,888 chunks/epoch (cross-checked two ways:
+# 904 steps/ep at batch 22 and 1,243 at batch 16), so batch 16 on a single
+# device gives 1,243 steps/epoch and 124,300 steps over 100 epochs.
+# warmup = 53.7% of that = 66,749, matching the paper's ramp fraction
+# (Table III caption: warm-up always 200k steps).
+#
+# Peak LR stays at the paper's validated 9.882e-5 -- deliberately NOT
+# sqrt-scaled, for the same reason SC_LibriSpeech_2spk_2500h_paperlr/
+# train_10spks.yaml gives: the authors' adapt config is a hand-edited local
+# debug run and is not a trustworthy batch-size reference.
+#
+#   noam_model_size = 1 / (peak_lr^2 * warmup)
+#                   = 1 / (9.882e-5^2 * 66749) = 1534
+#   realised peak 9.882e-5, decaying only to 7.242e-5 by the end
+#   (the old fraction-0.10 schedule ended around 3.7e-5).
+#
+# IF YOU RUN THIS UNDER DDP: two ranks halve the steps per epoch, so
+# noam_warmup_steps must halve to 33,375. noam_model_size stays 1534 --
+# squaring a sqrt(2) peak-LR increase against a 2x warmup decrease cancels
+# exactly. Getting this wrong reproduces the original bug in a new lineage.
+# Recompute for any other batch/GPU count with:
+#   python diaper/common_utils/noam_lr_calc.py --epochs 100 \
+#       --iters-per-epoch $((19888 / batch / ranks)) \
+#       --warmup-fraction 0.537 --peak-lr 9.882e-5
+#
+# KEPT FROM THE SOURCE LINEAGE, ON PURPOSE:
+#   use_spk_counting_head: false / spk_counting_loss_weight: 0.0
+#   allow_partial_warmstart: true  (the pretrain checkpoint has a counting
+#     head this model does not; partial warmstart drops it)
+#   intermediate_loss_perceiver: False -- note this differs from the
+#     paperlr baseline, which has it True. That is a SECOND uncontrolled
+#     difference against vanilla, pre-existing in this lineage. It is left
+#     alone here so B1 stays a clean single-variable delta against row 24,
+#     but it belongs in a later ablation.
+
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+spk_counting_loss_weight: 0.0
+condition_frame_encoder: True
+conformer_conv_kernel_size: 31
+conv_norm_type: batchnorm
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 16
+dropout_attractors: 0.1
+dropout_frames: 0.1
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_units: 2048
+frame_encoder_type: conformer
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+allow_partial_warmstart: true
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: False
+latents2attractors: mlp
+log_report_batches_num: 20
+max_epochs: 100
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+noam_model_size: 1534
+noam_warmup_steps: 66749
+norm_loss_per_spk: True
+num_frames: 2400
+num_speakers: 10
+num_workers: 8
+num_threads: 1
+optimizer: noam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_fixednoam_conformer_k31_adapted1-10_2500h_maximum10spks_mlp
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 16
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/validation
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_pretrain2500h/models
+use_spk_counting_head: false
