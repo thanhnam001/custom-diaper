@@ -1,6 +1,27 @@
 # Stage 4/4: finetune experiment B1's adapt checkpoint on MSDWild.
 # Read bucketed by reference speaker count, never pooled.
 # Reference: 18.12 (results.csv row 24).
+#
+# RESTORED: intermediate_loss_perceiver
+# ------------------------------------
+# The source lineage set intermediate_loss_perceiver: False from the ADAPT
+# stage onward (its own pretrain had it True, and so does every stage of
+# the paperlr baseline). The paper's Table VIII measures that exact
+# removal at 8.43 vs 7.96 DER on CH1-2spk -- **+0.47 DER, the second-worst
+# ablation in their table** after dropping loss normalization per speaker.
+# So this was ~0.5 DER of self-inflicted handicap carried by every
+# conformer / E-Branchformer row in results.csv, independent of the frame
+# encoder and independent of the LR schedule. It is turned back on here.
+#
+# Related, and NOT fixable without retraining the pretrain: this lineage's
+# latents2attractors: mlp hard-zeros the paper's latents-to-attractors
+# entropy term Le (models.py:1300 -- the term is only computed for
+# weighted_average), so l2a_entropy_loss_weight: 0.0 is a consequence of
+# choosing mlp, not an independent decision. The paper reports removing Le
+# as slightly worse (8.02 vs 7.96). Reverting mlp -> weighted_average is a
+# separate, more expensive experiment (it changes the weights, so it needs
+# a fresh pretrain) and is deliberately out of scope here.
+#
 
 activation_loss_BCE_weight: 1.0
 activation_loss_DER_weight: 0.0
@@ -32,7 +53,7 @@ init_epochs: 90-100
 init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_fixednoam_conformer_k31_adapted1-10_2500h_maximum10spks_mlp/models
 input_transform: logmel_meannorm
 intermediate_loss_frameencoder: True
-intermediate_loss_perceiver: False
+intermediate_loss_perceiver: True
 latents2attractors: mlp
 log_report_batches_num: 10
 lr: 1e-6

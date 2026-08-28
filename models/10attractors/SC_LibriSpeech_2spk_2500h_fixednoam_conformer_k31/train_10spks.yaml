@@ -65,11 +65,32 @@
 #   use_spk_counting_head: false / spk_counting_loss_weight: 0.0
 #   allow_partial_warmstart: true  (the pretrain checkpoint has a counting
 #     head this model does not; partial warmstart drops it)
-#   intermediate_loss_perceiver: False -- note this differs from the
+#   intermediate_loss_perceiver: True -- note this differs from the
 #     paperlr baseline, which has it True. That is a SECOND uncontrolled
 #     difference against vanilla, pre-existing in this lineage. It is left
 #     alone here so B1 stays a clean single-variable delta against row 24,
 #     but it belongs in a later ablation.
+#
+# RESTORED: intermediate_loss_perceiver
+# ------------------------------------
+# The source lineage set intermediate_loss_perceiver: False from the ADAPT
+# stage onward (its own pretrain had it True, and so does every stage of
+# the paperlr baseline). The paper's Table VIII measures that exact
+# removal at 8.43 vs 7.96 DER on CH1-2spk -- **+0.47 DER, the second-worst
+# ablation in their table** after dropping loss normalization per speaker.
+# So this was ~0.5 DER of self-inflicted handicap carried by every
+# conformer / E-Branchformer row in results.csv, independent of the frame
+# encoder and independent of the LR schedule. It is turned back on here.
+#
+# Related, and NOT fixable without retraining the pretrain: this lineage's
+# latents2attractors: mlp hard-zeros the paper's latents-to-attractors
+# entropy term Le (models.py:1300 -- the term is only computed for
+# weighted_average), so l2a_entropy_loss_weight: 0.0 is a consequence of
+# choosing mlp, not an independent decision. The paper reports removing Le
+# as slightly worse (8.02 vs 7.96). Reverting mlp -> weighted_average is a
+# separate, more expensive experiment (it changes the weights, so it needs
+# a fresh pretrain) and is deliberately out of scope here.
+#
 
 activation_loss_BCE_weight: 1.0
 activation_loss_DER_weight: 0.0
@@ -99,7 +120,7 @@ gradclip: 5
 allow_partial_warmstart: true
 input_transform: logmel_meannorm
 intermediate_loss_frameencoder: True
-intermediate_loss_perceiver: False
+intermediate_loss_perceiver: True
 latents2attractors: mlp
 log_report_batches_num: 20
 max_epochs: 100
