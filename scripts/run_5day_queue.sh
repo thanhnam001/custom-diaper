@@ -165,6 +165,10 @@
 # ENV KNOBS
 # ---------
 #   LANE_A_GPU / LANE_B_GPU   physical device ids       (default 0 / 1)
+#                             An exported CUDA_VISIBLE_DEVICES is honoured
+#                             too -- CUDA_VISIBLE_DEVICES=2,3 puts lane A on
+#                             gpu 2 and lane B on gpu 3. LANE_*_GPU wins if
+#                             both are given.
 #   RUN_DIAGNOSTICS=0         skip the D1 re-scores     (default 1)
 #   RUN_PRETRAIN=1            fresh 2-spk pretrains first; adds ~68 h PER
 #                             LANE and is NOT the default -- the default
@@ -189,6 +193,9 @@
 #   RAMC_MAX_INPUT_FRAMES     runaway guard, -1 = off (default)
 #   LOG_DIR                   default logs/5day_queue
 
+# Remember whether the caller pinned the lanes explicitly, before defaulting.
+_LANE_A_EXPLICIT="${LANE_A_GPU:-}"
+_LANE_B_EXPLICIT="${LANE_B_GPU:-}"
 LANE_A_GPU="${LANE_A_GPU:-0}"
 LANE_B_GPU="${LANE_B_GPU:-1}"
 LOG_DIR="${LOG_DIR:-logs/5day_queue}"
@@ -607,6 +614,45 @@ lane () {
 }
 
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Honour an inherited CUDA_VISIBLE_DEVICES.
+#
+# Every stage runs as `CUDA_VISIBLE_DEVICES="$gpu" python ...`, and a
+# per-command assignment overrides an exported one -- so without this block,
+#   CUDA_VISIBLE_DEVICES=2,3 ./scripts/run_5day_queue.sh
+# would silently discard the 2,3 and run both lanes on physical 0 and 1,
+# very possibly on top of somebody else's job. Rather than ignore it, take
+# the list as the lane device assignment, which is what anyone typing it
+# means (and matches the GPUS= convention of the other pipeline scripts).
+# An explicit LANE_A_GPU / LANE_B_GPU always wins over it.
+# ---------------------------------------------------------------------------
+if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    IFS=',' read -r -a _cvd <<< "$CUDA_VISIBLE_DEVICES"
+    _from_cvd=""
+    if [ -z "$_LANE_A_EXPLICIT" ] && [ -n "${_cvd[0]:-}" ]; then
+        LANE_A_GPU="${_cvd[0]}"; _from_cvd="yes"
+    fi
+    if [ -z "$_LANE_B_EXPLICIT" ]; then
+        # With only one device listed, lane B takes that same device rather
+        # than keeping its default of 1 -- otherwise it would quietly train
+        # on a GPU the caller never listed, which is the exact failure this
+        # block exists to prevent.
+        LANE_B_GPU="${_cvd[1]:-${_cvd[0]}}"; _from_cvd="yes"
+    fi
+    if [ -n "$_from_cvd" ]; then
+        log "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES -> lane A gpu $LANE_A_GPU, lane B gpu $LANE_B_GPU"
+    fi
+    if [ "${#_cvd[@]}" -lt 2 ] && [ -z "$ONLY_LANE" ]; then
+        log "WARNING: CUDA_VISIBLE_DEVICES lists only ${#_cvd[@]} device, but both"
+        log "WARNING: lanes will run and now SHARE gpu $LANE_A_GPU. At batch 16 over"
+        log "WARNING: 2400 frames they will contend and probably both OOM."
+        log "WARNING: Fix: pass ONLY_LANE=A (or B), or list two devices."
+    fi
+    # Consumed. Leaving it exported is harmless (each stage overrides it),
+    # but unsetting keeps `nvidia-smi`-style debugging from being confusing.
+    unset CUDA_VISIBLE_DEVICES
+fi
 
 log "5-day queue starting"
 log "  lane A (E-Branchformer) gpu=$LANE_A_GPU  cfg=$EBF_DIR"
