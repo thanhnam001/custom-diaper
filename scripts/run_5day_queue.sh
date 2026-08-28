@@ -283,12 +283,14 @@ ramc_lock_release () { rm -rf "$RAMC_LOCK"; }
 # the 2500h caches they must come from S3 (s3-b200:ttnt-data/ocr/namvt17/...,
 # see scripts/extract_tar_subset_from_s3.py) -- there is no local copy.
 #
-# The adapt chunk count is checked, not just the directory's existence:
-# noam_warmup_steps: 66749 is derived from 19,888 chunks/epoch at batch 16.
-# A partial cache would silently produce a different realized schedule, which
-# is the exact class of bug this whole lineage exists to fix.
+# The adapt chunk count is checked, not just the directory's existence: a
+# cache of a different size changes steps/epoch and so the realized shape of
+# the Noam schedule, which is the exact class of bug this lineage exists to
+# fix. The expected value was corrected on 2026-08-28 from 19,888 to the
+# 39,064 the server actually holds -- see the adapt config's NOAM header for
+# why the schedule values were kept unchanged despite that.
 # ---------------------------------------------------------------------------
-ADAPT_EXPECTED_CHUNKS="${ADAPT_EXPECTED_CHUNKS:-19888}"
+ADAPT_EXPECTED_CHUNKS="${ADAPT_EXPECTED_CHUNKS:-39064}"
 
 preflight () {
     local cfgdir="$1" label="$2" fail=0 p n
@@ -328,10 +330,13 @@ preflight () {
         log "  adapt cache: $n chunks (expected ~$ADAPT_EXPECTED_CHUNKS)"
         if [ "$n" -lt $(( ADAPT_EXPECTED_CHUNKS * 98 / 100 )) ] || \
            [ "$n" -gt $(( ADAPT_EXPECTED_CHUNKS * 102 / 100 )) ]; then
-            log "  *** adapt cache size is off by >2%. noam_warmup_steps: 66749"
-            log "  *** assumes $ADAPT_EXPECTED_CHUNKS chunks / 1,243 steps per epoch at batch 16."
-            log "  *** Recompute with diaper/common_utils/noam_lr_calc.py before running,"
-            log "  *** or the schedule will not be the one this lineage documents."
+            log "  *** adapt cache size is off by >2% from the $ADAPT_EXPECTED_CHUNKS chunks"
+            log "  *** (2,442 steps/epoch at batch 16) that noam_warmup_steps: 66749 was"
+            log "  *** checked against. Recompute the realized ramp fraction with"
+            log "  *** diaper/common_utils/noam_lr_calc.py --epochs 100 \\"
+            log "  ***   --iters-per-epoch \$(( $n / 16 )) --warmup-fraction 0.537 --peak-lr 9.882e-5"
+            log "  *** and see the adapt config's NOAM header before changing anything --"
+            log "  *** the values are matched to the paperlr baseline on purpose."
             fail=1
         fi
     fi
