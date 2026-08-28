@@ -1,0 +1,96 @@
+# Stage 3/4: finetune experiment A1's adapt checkpoint on RAMC.
+#
+# THIS IS THE STAGE THAT DECIDES THE EXPERIMENT. RAMC (43 files) is the
+# only one of the two benchmarks with the statistical power to resolve the
+# 2-3 DER effects at stake here; MSDWild pooled DER cannot resolve anything
+# below ~1.5 (see MEMORY.md's diaper-der-statistical-power). Run this
+# before the MSDWild finetune, not after.
+#
+# Unchanged from the source lineage's finetune_ramc_10spks.yaml except
+# init_model_path/output_path (now A1's adapt output) and num_workers.
+# The finetune optimiser (Adam, flat lr 1e-6) is deliberately untouched so
+# the delta against results.csv row 25 stays attributable to the adapt
+# schedule alone -- sweeping that LR is filler F2, a separate experiment.
+#
+# RESTORED: intermediate_loss_perceiver
+# ------------------------------------
+# The source lineage set intermediate_loss_perceiver: False from the ADAPT
+# stage onward (its own pretrain had it True, and so does every stage of
+# the paperlr baseline). The paper's Table VIII measures that exact
+# removal at 8.43 vs 7.96 DER on CH1-2spk -- **+0.47 DER, the second-worst
+# ablation in their table** after dropping loss normalization per speaker.
+# So this was ~0.5 DER of self-inflicted handicap carried by every
+# conformer / E-Branchformer row in results.csv, independent of the frame
+# encoder and independent of the LR schedule. It is turned back on here.
+#
+# Related, and NOT fixable without retraining the pretrain: this lineage's
+# latents2attractors: mlp hard-zeros the paper's latents-to-attractors
+# entropy term Le (models.py:1300 -- the term is only computed for
+# weighted_average), so l2a_entropy_loss_weight: 0.0 is a consequence of
+# choosing mlp, not an independent decision. The paper reports removing Le
+# as slightly worse (8.02 vs 7.96). Reverting mlp -> weighted_average is a
+# separate, more expensive experiment (it changes the weights, so it needs
+# a fresh pretrain) and is deliberately out of scope here.
+#
+
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+early_stopping: true
+early_stopping_patience: 100
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_type: ebranchformer
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_fixednoam_ebf_adapted1-10_2500h_maximum10spks_mlp/models
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: True
+l2a_entropy_loss_weight: 0.0
+latents2attractors: mlp
+log_report_batches_num: 10
+lr: 1e-6
+max_epochs: 500
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+norm_loss_per_spk: True
+num_frames: 600
+num_speakers: 10
+num_workers: 8
+num_threads: 1
+optimizer: adam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_fixednoam_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneRAMC
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 10
+time_shuffle: False
+train_batchsize: 32
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/ramc_precomputed_6000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/ramc_precomputed_6000frames/dev

@@ -1,0 +1,55 @@
+# Inference for experiment A1's RAMC-finetuned checkpoint.
+#
+# median_window_length: 1 / subsampling: 5 -- RAMC is scored at a 0s collar,
+# and per paper Section IV.D no median filter is applied in that case and
+# the frame encoder subsamples 5 instead of 10. Do not copy these values
+# to/from infer_msdwild.yaml (median 11 / subsampling 10).
+#
+# HARDWARE: num_frames: -1 at subsampling 5 over ~31-minute RAMC recordings
+# does not fit a 6GB GPU (0/43 test files). Run this on the server.
+#
+# Diagnostic D1 of the five-day queue re-runs this same config with
+# --subsampling 10 --median-window-length 11 to test whether the conv
+# branches are being taxed by the 2x train/inference resolution mismatch;
+# report that as an extra results.csv column, not a replacement.
+
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+estimate_spk_qty: -1
+estimate_spk_qty_thr: 0.5
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_type: ebranchformer
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+gpu: 1
+infer_data_dir: /data/ocr/namvt17/dataset/diarization/ramc/kaldi/test
+input_transform: logmel_meannorm
+latents2attractors: mlp
+median_window_length: 1
+model_type: AttractorPerceiver
+models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_fixednoam_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneRAMC/models
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+num_frames: -1
+num_speakers: 10
+pre_xa_heads: 4
+rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_fixednoam_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneRAMC/ramc_test_pred
+sampling_rate: 16000
+seed: 3
+subsampling: 5
+time_shuffle: False
+threshold: 0.5
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
