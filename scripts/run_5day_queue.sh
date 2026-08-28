@@ -2,7 +2,11 @@
 # Five-day, 2-GPU experiment queue for the conformer / E-Branchformer
 # lineages. Start it once and leave it:
 #
+#   mkdir -p logs/5day_queue
 #   nohup ./scripts/run_5day_queue.sh > logs/5day_queue/driver.log 2>&1 &
+#
+# (the mkdir matters: the shell opens that redirect before the script runs,
+# so without it the redirect fails and nothing starts)
 #
 # Deliberately NO `set -e`. This runs unattended for days; a stage that
 # fails must log and let its lane continue to the next item, not take the
@@ -169,7 +173,11 @@
 #   RUN_MSDWILD=0             RAMC only                 (default 1)
 #   RUN_FILLERS=0             skip F1/F2                (default 1)
 #   ONLY_LANE=A|B             run a single lane
-#   SKIP_PREFLIGHT=1          start even if a dependency is missing (don't)
+#   STRICT_PREFLIGHT=1        abort a lane if a dependency looks wrong.
+#                             Default is ADVISORY: problems are logged and
+#                             the lane starts anyway, so a false positive
+#                             can never cost an unattended five-day run.
+#   SKIP_PREFLIGHT=1          don't run the dependency check at all
 #   ADAPT_EXPECTED_CHUNKS     chunks/epoch the Noam steps assume (19888)
 #   RAMC_INFER_DEVICE=gpu     try RAMC inference on the GPU anyway
 #                             (default cpu). Worth trying at subsampling
@@ -322,8 +330,20 @@ preflight () {
     fi
 
     if [ "$fail" -ne 0 ]; then
-        log "PREFLIGHT FAILED for $label -- lane not started."
-        return 1
+        # ADVISORY BY DEFAULT. This runs unattended for five days; a false
+        # positive here (a symlinked data dir, a legitimately different chunk
+        # count) must never cost the whole run. Everything above is logged so
+        # the driver log says what was wrong, and the lane starts anyway --
+        # a genuinely missing path just makes its own stage fail, and the
+        # lane moves on to the next item as it would for any other failure.
+        # Set STRICT_PREFLIGHT=1 to abort the lane instead.
+        log "PREFLIGHT: $label has problems above."
+        if [ "${STRICT_PREFLIGHT:-0}" = "1" ]; then
+            log "PREFLIGHT FAILED for $label (STRICT_PREFLIGHT=1) -- lane not started."
+            return 1
+        fi
+        log "PREFLIGHT: continuing anyway (STRICT_PREFLIGHT=1 would stop here)."
+        return 0
     fi
     log "PREFLIGHT OK for $label"
     return 0
@@ -488,6 +508,8 @@ lane () {
             return 1
         fi
     fi
+    # Note: preflight only returns non-zero under STRICT_PREFLIGHT=1. By
+    # default it reports and the lane proceeds -- see its header.
 
     # -- D1 diagnostic, in the background from the start --------------------
     # Re-score the EXISTING old-recipe checkpoint at MSDWild's resolution
