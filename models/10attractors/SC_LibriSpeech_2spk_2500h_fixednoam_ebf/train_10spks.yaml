@@ -28,11 +28,30 @@
 #
 # NOAM PARAMETERS FOR train_batchsize: 16 ON ONE GPU
 # ---------------------------------------------------
-# 2500h of 4-minute chunks is 19,888 chunks/epoch (cross-checked two ways:
-# 904 steps/ep at batch 22 and 1,243 at batch 16), so batch 16 on a single
-# device gives 1,243 steps/epoch and 124,300 steps over 100 epochs.
-# warmup = 53.7% of that = 66,749, matching the paper's ramp fraction
-# (Table III caption: warm-up always 200k steps).
+# CORRECTED 2026-08-28 against the actual cache on the server, which holds
+# **39,064 chunks** (x 4 min = ~2,604 h, i.e. the real 2500h corpus). The
+# figure this repo's configs have always quoted -- 19,888 chunks, "904
+# steps/ep at batch 22 and 1,243 at batch 16" -- is almost exactly half
+# that, and corresponds to ~1,326 h. It looks like it was measured from a
+# 2-rank DDP run, where each rank's loader is half the epoch.
+#
+# So at batch 16 on ONE device the real figures are 2,442 steps/epoch and
+# 244,200 steps over 100 epochs -- and noam_warmup_steps: 66749 is
+# therefore **27.3% of the run, not the 53.7% the paper describes**.
+#
+# THE VALUES BELOW ARE KEPT ANYWAY, DELIBERATELY. The reference this
+# lineage is measured against -- paperlr, results.csv row 20, RAMC 20.80 --
+# ran its adapt stage at batch 22 with noam_model_size/noam_warmup_steps of
+# 2111/48500, which against the same 39,064 chunks realizes **the same
+# 27.3% ramp** at the same 9.882e-5 peak. Matching it keeps the frame
+# encoder the variable under test. Re-deriving a true 53.7% ramp here
+# (781 / 131135) would hand these lanes a schedule their own baseline never
+# had, and reintroduce exactly the kind of confound this lineage exists to
+# remove. If you ever want that variant, run it as a separate row.
+#
+# Both schedules still fix the sibling lineage's actual defect: it peaked
+# at 17.7% of its run and decayed to 3.658e-5, where this one ends at
+# 7.24e-5.
 #
 # Peak LR stays at the paper's validated 9.882e-5 -- deliberately NOT
 # sqrt-scaled, for the same reason SC_LibriSpeech_2spk_2500h_paperlr/
@@ -50,7 +69,7 @@
 # exactly. Getting this wrong reproduces the original bug in a new lineage.
 # Recompute for any other batch/GPU count with:
 #   python diaper/common_utils/noam_lr_calc.py --epochs 100 \
-#       --iters-per-epoch $((19888 / batch / ranks)) \
+#       --iters-per-epoch $((39064 / batch / ranks)) \
 #       --warmup-fraction 0.537 --peak-lr 9.882e-5
 #
 # Everything else is untouched from

@@ -24,6 +24,20 @@
 # not resume-stable) and given the paper's 53.7% ramp fraction at the batch
 # size a single V100 can hold.
 #
+#
+# UNVERIFIED CHUNK COUNT -- READ BEFORE USING THIS STAGE
+# The 119,160 figure below comes from the same repo-wide assumption that the
+# adapt stage's 19,888 did, and that one was measured on the server as
+# 39,064 -- about 2x larger (see train_10spks.yaml's NOAM header). 2500h of
+# 1-minute chunks should be ~150,000, so 119,160 is very likely low here
+# too. Nobody has counted this cache. Since RUN_PRETRAIN defaults to 0 this
+# stage normally never runs; if you do enable it, count the cache first:
+#     ls <train_precomputed_dir> | wc -l
+# then recompute with
+#     python diaper/common_utils/noam_lr_calc.py --epochs 100 #         --iters-per-epoch $((count / 96)) --warmup-fraction 0.537 #         --peak-lr 1.712e-4
+# and decide, as the adapt stage did, whether to match the paper's ramp
+# fraction or the baseline lineage's realized one.
+#
 # NOAM PARAMETERS FOR train_batchsize: 96 ON ONE GPU
 # ---------------------------------------------------
 # Only needed if you run a fresh pretrain. The default five-day plan skips
