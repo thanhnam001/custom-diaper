@@ -235,6 +235,63 @@ fi
 
 log () { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+# ---------------------------------------------------------------------------
+# STOPPING THE QUEUE
+#
+# Ctrl+C alone does NOT stop this script, and that is not a bug in the
+# handler -- it is POSIX. `lane A ... &` backgrounds a subshell, and a
+# background job started by a NON-interactive shell has SIGINT and SIGQUIT
+# set to ignore. So Ctrl+C kills the driver and whatever python is in the
+# foreground, while both lane subshells survive and cheerfully start the
+# next stage. Hence the trap below, which escalates to the whole process
+# group (subshells do not ignore SIGTERM), plus a stop file for the cases
+# where signalling is awkward.
+#
+#   Ctrl+C, or `kill <driver pid>`   -> trap fires, whole group torn down
+#   touch $LOG_DIR/STOP              -> no NEW stage starts; whatever is
+#                                       already running finishes first
+#                                       (an adapt stage can be ~58 h, so
+#                                       this is "stop after this", not
+#                                       "stop now")
+#
+# If a pre-trap instance is already loose, kill it by process group:
+#   PGID=$(ps -o pgid= -p "$(pgrep -f run_5day_queue.sh | head -1)" | tr -d ' ')
+#   kill -TERM -- "-$PGID"
+# ---------------------------------------------------------------------------
+STOP_FILE="${LOG_DIR}/STOP"
+
+stop_requested () { [ -f "$STOP_FILE" ]; }
+
+on_signal () {
+    trap - INT TERM
+    log "caught SIG$1 -- stopping the queue"
+    : > "$STOP_FILE"
+
+    local mypgid
+    mypgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+    if [ -n "$mypgid" ] && [ "$mypgid" = "$$" ]; then
+        # Own process-group leader (the normal case when launched as
+        # `./run_5day_queue.sh` or under nohup): tear the group down. This
+        # signals the lane subshells, their python children, and any
+        # background RAMC scoring. SIGTERM first so python can unwind.
+        log "terminating process group $mypgid"
+        kill -TERM 0 2>/dev/null
+        sleep 5
+        kill -KILL 0 2>/dev/null
+    else
+        # Not a group leader (sourced, or an unusual launch). Killing the
+        # group here would take the caller's shell with it, so only touch
+        # what we know is ours.
+        log "not a process-group leader (pgid=${mypgid:-unknown}); killing tracked children"
+        local p
+        for p in ${pids[@]+"${pids[@]}"}; do kill -TERM "$p" 2>/dev/null; done
+        pkill -TERM -P $$ 2>/dev/null
+    fi
+    exit 130
+}
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
+
 yaml_get () {  # yaml_get <key> <file>
     grep "^$1:" "$2" | head -1 | sed "s|^$1: *||"
 }
@@ -260,6 +317,13 @@ ramc_lock_acquire () {
             continue
         fi
         sleep 60
+        # Don't keep waiting on the lock through a shutdown -- otherwise a
+        # queued scoring can sit here for hours and the lane's final wait
+        # blocks behind it.
+        if stop_requested; then
+            log "STOP requested while waiting for the RAMC lock -- giving up"
+            return 1
+        fi
         waited=$((waited + 60))
         if [ "$waited" -ge "$RAMC_LOCK_TIMEOUT" ]; then
             log "RAMC lock still held after ${waited}s -- SKIPPING this scoring"
@@ -371,6 +435,10 @@ train_stage () {
         log "SKIP $label -- config not found: $cfg"
         return 1
     fi
+    if stop_requested; then
+        log "STOP requested -- not starting $label"
+        return 1
+    fi
     for attempt in 1 2; do
         log "START $label (attempt $attempt/2) gpu=$gpu cfg=$cfg"
         CUDA_VISIBLE_DEVICES="$gpu" "${PY[@]}" diaper/train.py -c "$cfg" \
@@ -381,9 +449,18 @@ train_stage () {
             return 0
         fi
         log "FAIL  $label (exit $rc) -- see $logfile"
-        # A second attempt is nearly free: train.py resumes from the latest
-        # checkpoint, so a transient OOM/filesystem blip costs minutes. A
-        # config or data error fails identically twice and the lane moves on.
+        # Never retry a stage that was signalled: exit >= 128 means the
+        # process died on a signal (130 = SIGINT, 143 = SIGTERM), i.e. you
+        # are trying to stop the queue, and a retry would restart the very
+        # thing you just killed.
+        if [ "$rc" -ge 128 ] || stop_requested; then
+            log "      not retrying (signalled or STOP requested)"
+            return 1
+        fi
+        # Otherwise a second attempt is nearly free: train.py resumes from
+        # the latest checkpoint, so a transient OOM/filesystem blip costs
+        # minutes. A config or data error fails identically twice and the
+        # lane moves on.
     done
     return 1
 }
@@ -407,6 +484,10 @@ infer_stage () {
     fi
     if [ ! -d "$models_path" ]; then
         log "SKIP infer $label -- no models dir at $models_path"
+        return 1
+    fi
+    if stop_requested; then
+        log "STOP requested -- not starting infer $label"
         return 1
     fi
 
@@ -487,6 +568,10 @@ infer_stage () {
 ramc_infer_bg () {
     local label="$1" cfg="$2" models_path="$3" rttms_dir="$4"
     local median="$5" suffix="$6" logfile="$7" jobfile="$8"; shift 8
+    if stop_requested; then
+        log "STOP requested -- not queueing RAMC scoring: $label"
+        return 1
+    fi
     (
         if ! ramc_lock_acquire; then exit 1; fi
         trap 'ramc_lock_release' EXIT
@@ -667,6 +752,9 @@ log "  RAMC inference device=$RAMC_INFER_DEVICE (serialized across lanes)"
 log "  logs: $LOG_DIR"
 
 rm -rf "$RAMC_LOCK"
+# A STOP file left behind by a previous run would otherwise silently make
+# this one do nothing at all.
+rm -f "$STOP_FILE"
 
 pids=()
 if [ -z "$ONLY_LANE" ] || [ "$ONLY_LANE" = "A" ]; then
