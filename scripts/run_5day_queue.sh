@@ -49,28 +49,40 @@
 #                            noise at random SNR plus reverberation.
 #
 #
-# PREREQUISITE WEIGHTS -- STAGE THESE BEFORE STARTING
+# PREREQUISITE WEIGHTS AND DATA -- AUDITED 2026-08-28
 # -----------------------------------------------------
-# Checkpoints that are not on the local Windows checkout are GONE: there is
-# no copy to fall back on, and no pretrain or adapt stage can be resumed
-# from them. Everything this queue needs does still exist locally, but it
-# has to be on the server under $EXPROOT before the first stage runs.
-# Verified present, epochs 91-100 in every case:
+# Anything absent from the local Windows checkout is GONE -- no server copy,
+# and no pretrain or adapt stage can be resumed from it. Every dependency
+# below was checked locally for existence, epoch coverage, and torch.load.
 #
-#   warm-start, lane A   .../SC_LibriSpeech_2spk_2500h_paperlr_ebf_pretrain2500h_mlp/models
-#                        (861 MB, epochs 71-100)
-#   warm-start, lane B   .../SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_pretrain2500h/models
-#                        (257 MB, epochs 91-100)
-#   D1, lane A           .../SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneRAMC/models
-#   D1, lane B           .../SC_LibriSpeech_2spk_conformer_kernel31_mlp_fresh_2500h_spkcounting_adapted1-10_2500h_maximum10spks_mlp_headoff/models_finetuneRAMC/models
+# CHECKPOINTS -- ALL FIVE PRESENT AND INTACT. Nothing needs a rerun.
+#   warm-start A   ..._2500h_paperlr_ebf_pretrain2500h_mlp/models
+#                  30 ckpts ep 71-100, 903 MB (301 MB pruned to last 10),
+#                  covers init_epochs 90-100, loads OK
+#   warm-start B   ..._conformer_kernel31_mlp_fresh_2500h_spkcounting_pretrain2500h/models
+#                  10 ckpts ep 91-100, 269 MB, covers init_epochs, loads OK
+#   D1 lane A      ..._paperlr_ebf_adapted.../models_finetuneRAMC/models
+#                  30 ckpts ep 178-207, 2,708 MB (903 MB pruned), loads OK
+#   D1 lane B      ..._headoff/models_finetuneRAMC/models
+#                  10 ckpts ep 273-282, 805 MB, loads OK
+#   D1 control     ..._paperlr_adapted.../models_finetuneRAMC/models
+#                  10 ckpts ep 322-331, 524 MB, loads OK
+#   -> ~2.8 GB total to upload if each is pruned to its last 10 checkpoints.
 #
-# Only the last 10 checkpoints of each are ever read (init_epochs: 90-100
-# for the warm-starts, MAX_CHECKPOINTS_TO_AVERAGE for D1), so the D1 dirs
-# can be pruned to ~300 MB each before upload.
+# FINETUNE DATA -- PRESENT LOCALLY, and verifiably the caches the published
+# runs used (their dev chunk counts match the TensorBoard step spacing):
+#   ramc_precomputed_6000frames      9,180 train / 607 dev   (9.3 GB, 7.9 GB zipped)
+#   msdwild_precompute_6000frames    5,202 train / 331 dev   (3.5 GB zipped)
+#   ramc/kaldi/test, msdwild/kaldi/test -- complete, for inference
 #
-# The RUN_PRETRAIN=1 path additionally needs the 2500h 2-speaker pretrain
-# feature cache, and produces new pretrain checkpoints rather than reading
-# any -- it does not depend on anything that might be lost.
+# SC DATA -- confirmed by the user as always present on the server, so the
+# 2500h caches are not a staging concern. Worth knowing anyway: they are NOT
+# on the local machine (E:/datasets holds only the 300h/500h equivalents),
+# so the server is the only copy apart from the S3 tars
+# (s3-b200:ttnt-data/ocr/namvt17/*.tar). The preflight still counts the
+# adapt cache's chunks -- not to check it exists, but because
+# noam_warmup_steps: 66749 is derived from 19,888 chunks/epoch and a cache
+# that differs would silently change the realized schedule.
 #
 # Because nothing is recoverable, do not let a stage overwrite an
 # output_path that already holds checkpoints you still want: every stage
@@ -157,6 +169,8 @@
 #   RUN_MSDWILD=0             RAMC only                 (default 1)
 #   RUN_FILLERS=0             skip F1/F2                (default 1)
 #   ONLY_LANE=A|B             run a single lane
+#   SKIP_PREFLIGHT=1          start even if a dependency is missing (don't)
+#   ADAPT_EXPECTED_CHUNKS     chunks/epoch the Noam steps assume (19888)
 #   RAMC_INFER_DEVICE=gpu     try RAMC inference on the GPU anyway
 #                             (default cpu). Worth trying at subsampling
 #                             10, where the token count halves and the
@@ -240,6 +254,80 @@ ramc_lock_acquire () {
 }
 
 ramc_lock_release () { rm -rf "$RAMC_LOCK"; }
+
+# ---------------------------------------------------------------------------
+# preflight -- verify every path a lane will read, BEFORE burning GPU hours.
+#
+# Audited against the local Windows checkout on 2026-08-28: all five required
+# checkpoint directories exist, cover the epochs their configs ask for, and
+# torch.load cleanly. What is NOT on the local machine, and therefore cannot
+# be restored from it if the server has lost it, is the 2500h SC data:
+#   diaper_precompute_2500h_maximum_10spks_24000frames  (adapt -- REQUIRED)
+#   diaper_precompute_2500h_fixed_2spks                 (only if RUN_PRETRAIN=1)
+# E:/datasets holds only the 300h/500h equivalents. If the server has lost
+# the 2500h caches they must come from S3 (s3-b200:ttnt-data/ocr/namvt17/...,
+# see scripts/extract_tar_subset_from_s3.py) -- there is no local copy.
+#
+# The adapt chunk count is checked, not just the directory's existence:
+# noam_warmup_steps: 66749 is derived from 19,888 chunks/epoch at batch 16.
+# A partial cache would silently produce a different realized schedule, which
+# is the exact class of bug this whole lineage exists to fix.
+# ---------------------------------------------------------------------------
+ADAPT_EXPECTED_CHUNKS="${ADAPT_EXPECTED_CHUNKS:-19888}"
+
+preflight () {
+    local cfgdir="$1" label="$2" fail=0 p n
+    log "PREFLIGHT $label"
+
+    for spec in \
+        "adapt-init:$(yaml_get init_model_path "$cfgdir/train_10spks.yaml")" \
+        "adapt-train:$(yaml_get train_precomputed_dir "$cfgdir/train_10spks.yaml")" \
+        "adapt-valid:$(yaml_get valid_precomputed_dir "$cfgdir/train_10spks.yaml")" \
+        "ramc-train:$(yaml_get train_precomputed_dir "$cfgdir/finetune_ramc_10spks.yaml")" \
+        "ramc-dev:$(yaml_get valid_precomputed_dir "$cfgdir/finetune_ramc_10spks.yaml")" \
+        "msd-train:$(yaml_get train_precomputed_dir "$cfgdir/finetune_msdwild_10spks.yaml")" \
+        "msd-dev:$(yaml_get valid_precomputed_dir "$cfgdir/finetune_msdwild_10spks.yaml")" \
+        "ramc-infer:$(yaml_get infer_data_dir "$cfgdir/infer_ramc.yaml")" \
+        "msd-infer:$(yaml_get infer_data_dir "$cfgdir/infer_msdwild.yaml")" ; do
+        p="${spec#*:}"
+        if [ -d "$p" ]; then
+            log "  ok      ${spec%%:*}"
+        else
+            log "  MISSING ${spec%%:*} -> $p"
+            fail=1
+        fi
+    done
+
+    # the warm-start must actually contain the epochs init_epochs asks for
+    p=$(yaml_get init_model_path "$cfgdir/train_10spks.yaml")
+    if [ -d "$p" ]; then
+        n=$(find "$p" -maxdepth 1 -name 'checkpoint_*.tar' | wc -l)
+        log "  warm-start holds $n checkpoint(s); init_epochs=$(yaml_get init_epochs "$cfgdir/train_10spks.yaml")"
+        [ "$n" -lt 10 ] && { log "  WARNING: fewer than 10 checkpoints to average"; }
+    fi
+
+    # a partial adapt cache would silently change the realized Noam schedule
+    p=$(yaml_get train_precomputed_dir "$cfgdir/train_10spks.yaml")
+    if [ -d "$p" ]; then
+        n=$(find "$p" -maxdepth 1 -type f | wc -l)
+        log "  adapt cache: $n chunks (expected ~$ADAPT_EXPECTED_CHUNKS)"
+        if [ "$n" -lt $(( ADAPT_EXPECTED_CHUNKS * 98 / 100 )) ] || \
+           [ "$n" -gt $(( ADAPT_EXPECTED_CHUNKS * 102 / 100 )) ]; then
+            log "  *** adapt cache size is off by >2%. noam_warmup_steps: 66749"
+            log "  *** assumes $ADAPT_EXPECTED_CHUNKS chunks / 1,243 steps per epoch at batch 16."
+            log "  *** Recompute with diaper/common_utils/noam_lr_calc.py before running,"
+            log "  *** or the schedule will not be the one this lineage documents."
+            fail=1
+        fi
+    fi
+
+    if [ "$fail" -ne 0 ]; then
+        log "PREFLIGHT FAILED for $label -- lane not started."
+        return 1
+    fi
+    log "PREFLIGHT OK for $label"
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # train_stage <label> <gpu> <config> <logfile> [extra train.py args...]
@@ -393,6 +481,13 @@ lane () {
     ft_msd_out=$(yaml_get output_path "$CFG/finetune_msdwild_10spks.yaml")
 
     log "LANE $L on gpu $GPU -- adapt output: $adapt_out"
+
+    if [ "${SKIP_PREFLIGHT:-0}" != "1" ]; then
+        if ! preflight "$CFG" "lane $L"; then
+            log "LANE $L ABORTED before any GPU work. Fix the paths above and re-run."
+            return 1
+        fi
+    fi
 
     # -- D1 diagnostic, in the background from the start --------------------
     # Re-score the EXISTING old-recipe checkpoint at MSDWild's resolution
