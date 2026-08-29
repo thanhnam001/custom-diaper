@@ -1,0 +1,65 @@
+# Inference config for finetune_msdwild_10spks.yaml's output (this
+# directory's subsampling-5 E-Branchformer(mlp) MSDWild finetune, NOT the
+# sibling SC_LibriSpeech_2spk_2500h_paperlr_ebranchformer/infer_msdwild.yaml's
+# subsampling-10 checkpoint). See finetune_msdwild_10spks.yaml in this
+# directory for the full rationale, and in particular the kernel-size note:
+# ebranchformer_cgmlp_kernel_size / ebranchformer_merge_kernel_size are
+# left at their default 31 (not overridden below, same as every other
+# config in this lineage) -- deliberately NOT scaled to match subsampling
+# 5, since that would require --allow-partial-warmstart and randomly
+# reinitialize both conv layers in every E-Branchformer block. The 31-tap
+# kernel therefore spans 1.55s of wall-clock audio here instead of the
+# subsampling-10 sibling's 3.1s -- a known, accepted limitation, not a bug.
+#
+# subsampling: 5 here MUST match what the checkpoint was finetuned with.
+# median_window_length is deliberately left unset/placeholder-only, same
+# reasoning as the self-attention subsampling5 sibling's infer_msdwild.yaml
+# -- prefer scripts/run_infer_2500h_paperlr_ebranchformer_subsampling5.sh's
+# sweep over a single hardcoded value.
+#
+# epochs is intentionally omitted -- pass explicitly once checkpoints
+# exist, e.g.:
+#   python diaper/infer.py -c <this file> --epochs <range> \
+#       --median-window-length <N> --num-threads 4
+
+# inference options
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+estimate_spk_qty: -1
+estimate_spk_qty_thr: 0.5
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_type: ebranchformer
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+gpu: 1
+infer_data_dir: /data/ocr/namvt17/dataset/diarization/msdwild/kaldi/test
+input_transform: logmel_meannorm
+latents2attractors: mlp
+median_window_length: 11
+model_type: AttractorPerceiver
+models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneMSDWILD_subsampling5/models
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+num_frames: -1
+num_speakers: 10
+pre_xa_heads: 4
+rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneMSDWILD_subsampling5/msdwild_test_pred
+sampling_rate: 16000
+seed: 3
+subsampling: 5
+time_shuffle: False
+threshold: 0.5
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
