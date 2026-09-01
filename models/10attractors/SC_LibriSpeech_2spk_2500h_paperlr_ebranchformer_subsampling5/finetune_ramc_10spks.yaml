@@ -1,0 +1,123 @@
+# Stage 4/4-alt: finetune the SAME E-Branchformer(mlp) paperlr adapt
+# checkpoint (SC_LibriSpeech_2spk_2500h_paperlr_ebranchformer/
+# train_10spks.yaml's output) on real RAMC data, but at subsampling: 5
+# instead of the sibling finetune_ramc_10spks.yaml's subsampling: 10 --
+# same idea as this directory's finetune_msdwild_10spks.yaml, applied to
+# RAMC instead of MSDWild.
+#
+# UNLIKE THE MSDWILD VERSION, this is not introducing a new train/infer
+# mismatch -- RAMC's inference has ALWAYS run at subsampling 5 by
+# convention, even for the subsampling-10-trained sibling checkpoint
+# (SC_LibriSpeech_2spk_2500h_paperlr_ebranchformer/infer_ramc.yaml already
+# sets subsampling: 5, per Section IV.D: RAMC's 0s collar gets no median
+# filter and 5-frame subsampling for finer output resolution, unconditional
+# on what the model was actually trained at). So the sibling's checkpoint
+# has ALWAYS been evaluated at a resolution it never saw during finetuning.
+# This config's whole point is to finetune at the resolution RAMC has
+# always been scored at, closing that longstanding mismatch rather than
+# creating a new one the way the MSDWild subsampling5 experiment did.
+#
+# CRITICAL DIFFERENCE FROM THE SELF-ATTENTION VERSION -- KERNEL SIZE IS
+# DELIBERATELY *NOT* SCALED: same reasoning as this directory's
+# finetune_msdwild_10spks.yaml -- E-Branchformer's two depthwise convs
+# (--ebranchformer-cgmlp-kernel-size / --ebranchformer-merge-kernel-size,
+# both left at their default 31 by this whole lineage) have a FIXED
+# receptive field of 31 subsampled frames = 3.1s at subsampling 10, only
+# 1.55s at subsampling 5. Doubling both to 61 to compensate would require
+# --allow-partial-warmstart and randomly reinitialize both conv layers in
+# all 4 blocks, which this stage's lr: 1e-6 is not tuned to train from
+# scratch. Accepted as a known limitation, not silently papered over -- see
+# finetune_msdwild_10spks.yaml's matching note for the full argument.
+#
+# WHAT CHANGED vs. the sibling finetune_ramc_10spks.yaml (diff the two
+# files to confirm nothing else drifted):
+#   subsampling:  10 -> 5
+#   num_frames:  600 -> 1200     (doubled to hold the wall-clock chunk
+#                                  length fixed at 60s, matching the
+#                                  existing ramc_precomputed_6000frames
+#                                  cache's 6000-raw-frame chunks --
+#                                  precompute is in the raw-frame domain,
+#                                  so no re-precompute needed)
+#   output_path: ..._finetuneRAMC -> ..._finetuneRAMC_subsampling5
+#
+# COMPUTE WARNING: use_frame_selfattention: True is still True for
+# E-Branchformer (self-attention AND the conv branch run in parallel, then
+# merge), so doubling num_frames at fixed train_batchsize: 32 is ~4x the
+# attention-matrix cost per training step, same as the MSDWild sibling.
+# Halve train_batchsize to 16 first if this OOMs. This is a TRAINING-time
+# concern only (num_frames: 1200, chunked) -- unlike inference, training
+# never runs whole-recording, so it does not hit the same hardware ceiling
+# as infer_ramc.yaml's num_frames: -1.
+#
+# NOT a replacement for finetune_ramc_10spks.yaml -- report as an
+# additional row, alongside the E-Branchformer subsampling5 MSDWild result
+# and the plain self-attention subsampling5 RAMC result (if/when that gets
+# built).
+#
+# Run (server): ./scripts/run_finetune_2500h_paperlr_ebranchformer_subsampling5_ramc.sh
+# Then infer:   ./scripts/run_infer_2500h_paperlr_ebranchformer_subsampling5_ramc.sh
+#   (on the server only -- see infer_ramc.yaml's hardware warning in this
+#   directory, unchanged from the sibling)
+
+# training options
+activation_loss_BCE_weight: 1.0
+activation_loss_DER_weight: 0.0
+attractor_existence_loss_weight: 1.0
+attractor_frame_comparison: dotprod
+attractor_diversity_loss_weight: 0.1
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+detach_attractor_loss: False
+dev_batchsize: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+early_stopping: true
+early_stopping_patience: 100
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_type: ebranchformer
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+use_last_samples: True
+gpu: 1
+gradclip: 5
+init_epochs: 90-100
+init_model_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models
+input_transform: logmel_meannorm
+intermediate_loss_frameencoder: True
+intermediate_loss_perceiver: False
+l2a_entropy_loss_weight: 0.0
+latents2attractors: mlp
+log_report_batches_num: 10
+lr: 1e-6
+max_epochs: 500
+model_type: AttractorPerceiver
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+norm_loss_per_spk: True
+num_frames: 1200
+num_speakers: 10
+num_workers: 4
+num_threads: 1
+optimizer: adam
+output_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneRAMC_subsampling5
+pre_xa_heads: 4
+sampling_rate: 16000
+seed: 3
+specaugment: False
+subsampling: 5
+time_shuffle: False
+train_batchsize: 32
+train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/ramc_precomputed_6000frames/train
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
+valid_precomputed_dir: /data/ocr/namvt17/dataset/diarization/ramc_precomputed_6000frames/dev

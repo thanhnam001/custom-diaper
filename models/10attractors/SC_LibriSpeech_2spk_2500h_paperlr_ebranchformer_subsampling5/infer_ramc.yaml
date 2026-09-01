@@ -1,0 +1,82 @@
+# Inference config for finetune_ramc_10spks.yaml's output (this
+# directory's subsampling-5 E-Branchformer(mlp) RAMC finetune, NOT the
+# sibling SC_LibriSpeech_2spk_2500h_paperlr_ebranchformer/infer_ramc.yaml's
+# subsampling-10-trained checkpoint).
+#
+# UNLIKE THE SIBLING CONFIG, there is no train/infer resolution mismatch
+# here: the sibling's checkpoint was trained at subsampling 10 but always
+# inferred at subsampling 5 (RAMC's standing convention, Section IV.D: 0s
+# collar -> no median filter, subsampling 5 for finer resolution). This
+# checkpoint was FINETUNED at subsampling 5 in the first place, so
+# subsampling: 5 below matches what it was trained on -- this config's
+# whole point is checking whether closing that longstanding mismatch
+# helps, exactly the same question the MSDWild subsampling5 experiment
+# asked for its own (newly-introduced, not longstanding) mismatch.
+#
+# median_window_length: 1 -- unchanged from the sibling, RAMC's standing
+# no-median-filter convention for its 0s collar. Worth treating as a
+# starting point rather than a certainty here: a quick collar-0 rescore
+# done on a MSDWild subset in this same investigation found median1 was
+# NOT the collar-0 optimum there (median7 won a small sweep) -- untested
+# whether that generalizes to RAMC's own data, but
+# scripts/run_infer_2500h_paperlr_ebranchformer_subsampling5_ramc.sh sweeps
+# a small median range rather than assuming 1 is exactly right.
+#
+# HARDWARE WARNING (unchanged from the sibling): num_frames: -1
+# (whole-recording inference, required so attractor/speaker identity stays
+# consistent across a recording) combined with subsampling: 5 needs a
+# self-attention matrix over ~30k frame tokens for a 30-minute RAMC
+# recording -- OOM's badly on the local 6GB-GPU/limited-RAM machine (a
+# previous attempt tried to allocate 22GB for a single file; 0/43 test
+# files fit). Run RAMC inference on the server only.
+#
+# epochs is intentionally omitted -- no checkpoints exist for this lineage
+# yet. Pass explicitly once they do, e.g.:
+#   python diaper/infer.py -c <this file> --epochs <range> \
+#       --median-window-length <N> --num-threads 4
+#
+# Target for comparison: the sibling subsampling-10-trained checkpoint's
+# RAMC result (inferred at subsampling 5 despite the mismatch) and the
+# paper's published RAMC-with-FT DER of 21.1.
+
+# inference options
+condition_frame_encoder: True
+context_size: 7
+d_latents: 128
+dropout_attractors: 0.1
+dropout_frames: 0.1
+estimate_spk_qty: -1
+estimate_spk_qty_thr: 0.5
+feature_dim: 40
+frame_encoder_heads: 4
+frame_encoder_layers: 4
+frame_encoder_type: ebranchformer
+frame_encoder_units: 2048
+frame_shift: 160
+frame_size: 400
+gpu: 1
+infer_data_dir: /data/ocr/namvt17/dataset/diarization/ramc/kaldi/test
+input_transform: logmel_meannorm
+latents2attractors: mlp
+median_window_length: 1
+model_type: AttractorPerceiver
+models_path: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneRAMC_subsampling5/models
+n_attractors: 10
+n_blocks_attractors: 3
+n_internal_blocks_attractors: 1
+n_latents: 128
+n_selfattends_attractors: 2
+n_sa_heads_attractors: 4
+n_xa_heads_attractors: 4
+num_frames: -1
+num_speakers: 10
+pre_xa_heads: 4
+rttms_dir: /data/ocr/namvt17/custom-diaper/experiments/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebf_adapted1-10_2500h_maximum10spks_mlp/models_finetuneRAMC_subsampling5/ramc_test_pred
+sampling_rate: 16000
+seed: 3
+subsampling: 5
+time_shuffle: False
+threshold: 0.5
+use_frame_selfattention: True
+use_posenc: False
+use_pre_crossattention: True
