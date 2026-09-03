@@ -379,12 +379,28 @@ preflight () {
         fi
     done
 
-    # the warm-start must actually contain the epochs init_epochs asks for
+    # The warm-start must contain EVERY epoch init_epochs resolves to, not
+    # merely enough files. models.py::parse_epochs reads "90-100" as
+    # range(91, 101), and average_checkpoints then torch.loads each one with
+    # no existence check -- so a single gap is a hard crash at model init,
+    # before a step is taken. Check the exact set.
+    local ie lo hi e missing
     p=$(yaml_get init_model_path "$cfgdir/train_10spks.yaml")
-    if [ -d "$p" ]; then
-        n=$(find "$p" -maxdepth 1 -name 'checkpoint_*.tar' | wc -l)
-        log "  warm-start holds $n checkpoint(s); init_epochs=$(yaml_get init_epochs "$cfgdir/train_10spks.yaml")"
-        [ "$n" -lt 10 ] && { log "  WARNING: fewer than 10 checkpoints to average"; }
+    ie=$(yaml_get init_epochs "$cfgdir/train_10spks.yaml")
+    if [ -d "$p" ] && [[ "$ie" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        lo=$(( ${BASH_REMATCH[1]} + 1 )); hi="${BASH_REMATCH[2]}"
+        missing=""
+        for e in $(seq "$lo" "$hi"); do
+            [ -f "$p/checkpoint_${e}.tar" ] || missing="$missing $e"
+        done
+        if [ -n "$missing" ]; then
+            log "  MISSING warm-start epochs:$missing"
+            log "  *** init_epochs=$ie needs checkpoint_{$lo..$hi}.tar, all of them."
+            log "  *** average_checkpoints will raise on the first gap."
+            fail=1
+        else
+            log "  ok      warm-start epochs $lo..$hi complete ($(( hi - lo + 1 )) files)"
+        fi
     fi
 
     # a partial adapt cache would silently change the realized Noam schedule
