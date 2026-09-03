@@ -22,6 +22,9 @@
 # gzip spends minutes to save a few percent. Set COMPRESS=1 if the upload
 # link is slower than the CPU.
 #
+# For the RETURN leg -- bringing the queue's results back off the server --
+# use scripts/pack_results_from_server.sh.
+#
 # Only the last $KEEP checkpoints of each directory are packed. That is all
 # anything reads: the warm-starts are loaded through init_epochs: 90-100,
 # and the D1 checkpoints through MAX_CHECKPOINTS_TO_AVERAGE=10. Two of the
