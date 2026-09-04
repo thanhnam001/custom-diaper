@@ -37,9 +37,10 @@
 #
 # ON THE SERVER, from the repo root:
 #
-#   ./scripts/run_infer_adapt_2500h.sh                   # all 16, one GPU
+#   ./scripts/run_infer_adapt_2500h.sh                   # all 16
 #   DRY_RUN=1 ./scripts/run_infer_adapt_2500h.sh         # print the plan only
-#   DATASETS=ramc ./scripts/run_infer_adapt_2500h.sh     # RAMC only (fast: 43 files)
+#   DATASETS=msdwild ./scripts/run_infer_adapt_2500h.sh  # GPU half only
+#   DATASETS=ramc ./scripts/run_infer_adapt_2500h.sh     # CPU half only
 #   ONLY='fixednoam.*' ./scripts/run_infer_adapt_2500h.sh
 #
 # ONLY is an ANCHORED extended regex over the lineage labels, not a
@@ -49,13 +50,45 @@
 #   2500h_baseline  paperlr  paperlr_ebf  fixednoam_cnf
 #   fixednoam_ebf   spkcounting  headoff  overlaploss3
 #
-# Two GPUs, two shells -- MSDWild is 490 files per lineage and RAMC only
-# 43, so splitting by dataset is lopsided; splitting by lineage is not:
+# THE TWO DATASETS RUN ON DIFFERENT HARDWARE. This is the thing to get
+# right here, and it is not symmetric:
 #
-#   CUDA_VISIBLE_DEVICES=0 ONLY='2500h_baseline|paperlr|paperlr_ebf|fixednoam_cnf' \
+#   MSDWild  GPU, inline.  490 files, subsampling 10, fits a V100 fine.
+#   RAMC     CPU ONLY.     43 files, subsampling 5, num_frames -1.
+#
+# Whole-recording RAMC inference (31-min median recordings at subsampling
+# 5, O(T^2) whole-recording self-attention) does NOT fit a V100 -- not one,
+# not two. Measured on this server: ~120-130 GB of RAM and ~50 minutes for
+# all 43 files, on the CPU path. So the cost is RAM, not time -- but two
+# concurrent RAMC runs would ask for ~250 GB and take the BOX down, not
+# just the job. Every RAMC run here therefore runs with --gpu 0 and takes a
+# cross-shell lock, so RAMC runs queue behind each other even if you launch
+# several shells. Eight of them serialized is ~6-7 h.
+#
+# infer.py's --gpu is a DEVICE FLAG, not a count like train.py's: >= 1
+# means CUDA, anything lower means CPU. Hence --gpu 0 for RAMC.
+#
+# Not used here, on purpose: --fallback-cpu-oom. Its CPU retry has no
+# memory ceiling and can trigger an OS-level OOM that kills unrelated
+# processes rather than just itself. For a runaway guard set
+# RAMC_MAX_INPUT_FRAMES instead (it SKIPS over-long recordings, which makes
+# the DER a subset number -- the script warns when that happens).
+#
+# Two GPUs, two shells -- worth it for the MSDWild half only, since the
+# RAMC half uses no GPU and serializes itself regardless:
+#
+#   CUDA_VISIBLE_DEVICES=0 DATASETS=msdwild \
+#       ONLY='2500h_baseline|paperlr|paperlr_ebf|fixednoam_cnf' \
 #       ./scripts/run_infer_adapt_2500h.sh
-#   CUDA_VISIBLE_DEVICES=1 ONLY='fixednoam_ebf|spkcounting|headoff|overlaploss3' \
+#   CUDA_VISIBLE_DEVICES=1 DATASETS=msdwild \
+#       ONLY='fixednoam_ebf|spkcounting|headoff|overlaploss3' \
 #       ./scripts/run_infer_adapt_2500h.sh
+#
+# then the CPU half, once, in its own shell (no GPU needed, so it can
+# overlap the above if the box has the RAM to spare -- it needs ~130 GB
+# free on top of whatever the GPU lanes are using):
+#
+#   DATASETS=ramc ./scripts/run_infer_adapt_2500h.sh
 #
 # RESUMABLE. infer.py skips any recording whose RTTM already exists, and
 # this script skips a run outright once its output directory holds one RTTM
@@ -66,7 +99,9 @@
 
 set -eu
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# The GPU this shell's MSDWild runs use. RAMC ignores it -- it forces
+# CUDA_VISIBLE_DEVICES="" per run, see the device block below.
+GPU_DEVICE="${CUDA_VISIBLE_DEVICES:-0}"
 
 DIAPER_ENV="${DIAPER_ENV:-/data/ocr/namvt17/custom-diaper/.venv}"
 DSCORE_SRC="${DSCORE_SRC:-/data/ocr/namvt17/custom-diaper/dscore}"
@@ -78,6 +113,55 @@ DRY_RUN="${DRY_RUN:-0}"
 DATASETS="${DATASETS:-msdwild ramc}"
 ONLY="${ONLY:-}"
 CFG_ROOT="${CFG_ROOT:-models/10attractors}"
+
+# RAMC is the CPU path -- see the header. Same knob names and defaults as
+# run_5day_queue.sh, on purpose, so the two agree about this machine.
+RAMC_INFER_DEVICE="${RAMC_INFER_DEVICE:-cpu}"
+RAMC_CPU_THREADS="${RAMC_CPU_THREADS:-8}"
+RAMC_MAX_INPUT_FRAMES="${RAMC_MAX_INPUT_FRAMES:--1}"
+RAMC_LOCK_TIMEOUT="${RAMC_LOCK_TIMEOUT:-43200}"   # 12 h; 8 jobs x ~50 min
+LOG_DIR="${LOG_DIR:-logs/adapt_infer}"
+mkdir -p "$LOG_DIR"
+RAMC_LOCK="${LOG_DIR}/.ramc_infer.lock"
+
+# Cross-shell mutex for RAMC inference. mkdir is atomic on every filesystem
+# that matters here, so no flock/util-linux dependency. A lock whose owner
+# is gone is reclaimed -- otherwise one Ctrl-C mid-inference would block
+# every later RAMC run.
+ramc_lock_acquire () {
+    local waited=0 owner
+    while true; do
+        if mkdir "$RAMC_LOCK" 2>/dev/null; then
+            echo $$ > "$RAMC_LOCK/pid"
+            return 0
+        fi
+        owner=$(cat "$RAMC_LOCK/pid" 2>/dev/null || true)
+        if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+            echo "  RAMC lock held by dead pid $owner -- reclaiming"
+            rm -rf "$RAMC_LOCK"
+            continue
+        fi
+        if [ "$waited" -ge "$RAMC_LOCK_TIMEOUT" ]; then
+            echo "  RAMC lock still held after ${waited}s -- SKIPPING this run"
+            return 1
+        fi
+        if [ "$waited" = 0 ]; then
+            echo "  waiting for the RAMC lock (pid ${owner:-?} is running one; ~50 min each)"
+        fi
+        sleep 30
+        waited=$(( waited + 30 ))
+    done
+}
+ramc_lock_release () { rm -rf "$RAMC_LOCK"; }
+
+# Ctrl-C during a ~50-minute RAMC run would otherwise leave the lock behind.
+# Only ever drop a lock this shell actually owns.
+ramc_lock_release_if_mine () {
+    if [ "$(cat "$RAMC_LOCK/pid" 2>/dev/null || true)" = "$$" ]; then
+        ramc_lock_release
+    fi
+}
+trap ramc_lock_release_if_mine EXIT INT TERM
 
 # label|config dir|msdwild config|ramc config
 #
@@ -184,6 +268,24 @@ for lineage in "${LINEAGES[@]}"; do
         fi
         got=$(find "$rttms_dir/epochs${epochs_range}" -name '*.rttm' -type f 2>/dev/null | wc -l)
 
+        # Device is per-DATASET, not per-shell: RAMC does not fit a V100 at
+        # all (see the header), so it forces the CPU path and hides every
+        # GPU from the child. MSDWild uses this shell's GPU.
+        dev_args=(); visible=""; dev_label=""
+        if [ "$ds" = "ramc" ] && [ "$RAMC_INFER_DEVICE" = "cpu" ]; then
+            dev_args=(--gpu 0 --num-threads "$RAMC_CPU_THREADS")
+            visible=""
+            dev_label="CPU (~130 GB RAM, ~50 min), ${RAMC_CPU_THREADS} threads"
+            if [ "$RAMC_MAX_INPUT_FRAMES" != "-1" ]; then
+                dev_args+=(--max-input-frames "$RAMC_MAX_INPUT_FRAMES")
+                dev_label="$dev_label, skipping >${RAMC_MAX_INPUT_FRAMES} frames"
+            fi
+        else
+            dev_args=(--gpu 1 --num-threads "$NUM_THREADS")
+            visible="$GPU_DEVICE"
+            dev_label="GPU $GPU_DEVICE, ${NUM_THREADS} threads"
+        fi
+
         echo "=================================================================="
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] $name"
         echo "  config:      $cfg"
@@ -192,6 +294,7 @@ for lineage in "${LINEAGES[@]}"; do
         echo "  out:         $rttms_dir"
         echo "  epochs:      $epochs_range (averaging last $(( last_idx - start_idx + 1 )) of ${#ckpt_epochs[@]} checkpoint(s))"
         echo "  postproc:    median${median_window_length} subsampling${subsampling}, dscore collar ${collar:-0}"
+        echo "  device:      $dev_label"
         echo "=================================================================="
 
         if [ "$DRY_RUN" = "1" ]; then
@@ -202,12 +305,34 @@ for lineage in "${LINEAGES[@]}"; do
         if [ "$expected" -gt 0 ] && [ "$got" -ge "$expected" ]; then
             echo "  already complete ($got/$expected RTTMs) -- skipping inference"
         else
-            if ! conda run -p "$DIAPER_ENV" --no-capture-output python diaper/infer.py \
+            # Two concurrent RAMC runs would ask for ~250 GB and take the
+            # box down, so they queue behind each other across shells.
+            held_ramc_lock=0
+            if [ "$ds" = "ramc" ] && [ "$RAMC_INFER_DEVICE" = "cpu" ]; then
+                if ! ramc_lock_acquire; then
+                    SUMMARY+=("FAIL   $name  (RAMC lock timeout)")
+                    failed=$(( failed + 1 ))
+                    continue
+                fi
+                held_ramc_lock=1
+            fi
+
+            infer_rc=0
+            CUDA_VISIBLE_DEVICES="$visible" \
+            conda run -p "$DIAPER_ENV" --no-capture-output python diaper/infer.py \
                 -c "$cfg" \
                 --models-path "$models_path" \
                 --rttms-dir "$rttms_dir" \
                 --epochs "$epochs_range" \
-                --num-threads "$NUM_THREADS"; then
+                "${dev_args[@]}" || infer_rc=$?
+
+            # Not `[ ... ] && ramc_lock_release`: under `set -e` a false
+            # test makes the whole && list non-zero and kills the script.
+            if [ "$held_ramc_lock" = "1" ]; then
+                ramc_lock_release
+            fi
+
+            if [ "$infer_rc" -ne 0 ]; then
                 echo "  ERROR: inference failed for $name -- continuing with the next run"
                 SUMMARY+=("FAIL   $name  (inference)")
                 failed=$(( failed + 1 ))
