@@ -39,24 +39,67 @@ DRY_RUN=1 ./scripts/run_infer_adapt_2500h.sh    # check the plan first
 ./scripts/run_infer_adapt_2500h.sh
 ```
 
-Two GPUs — split by lineage, not by dataset (MSDWild is 490 files per
-lineage against RAMC's 43, so a dataset split is badly lopsided):
+### The two datasets run on different hardware
+
+This is the thing to get right, and it is not symmetric:
+
+| | MSDWild | RAMC |
+|---|---|---|
+| device | GPU, inline | **CPU only** (`--gpu 0`) |
+| files | 490 | 43 |
+| cost | fits a V100 fine | **~120–130 GB RAM**, ~50 min per run |
+
+Whole-recording RAMC inference (31-min median recordings, `subsampling: 5`,
+`num_frames: -1`, O(T²) whole-recording self-attention) **does not fit a
+V100 — not one, not two.** 2×V100 is 64 GB of VRAM against a ~130 GB
+requirement. It runs on the CPU path only.
+
+Worse, two *concurrent* RAMC runs would ask for ~250 GB and take the box
+down rather than just the job. So every RAMC run takes a cross-shell mkdir
+lock and they queue behind each other automatically, even across separate
+shells. Eight serialized is ~6–7 h.
+
+So: two GPUs are worth it for the **MSDWild half only** — the RAMC half
+uses no GPU and serializes itself regardless.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 ONLY='2500h_baseline|paperlr|paperlr_ebf|fixednoam_cnf' \
+CUDA_VISIBLE_DEVICES=0 DATASETS=msdwild \
+    ONLY='2500h_baseline|paperlr|paperlr_ebf|fixednoam_cnf' \
     ./scripts/run_infer_adapt_2500h.sh
-CUDA_VISIBLE_DEVICES=1 ONLY='fixednoam_ebf|spkcounting|headoff|overlaploss3' \
+CUDA_VISIBLE_DEVICES=1 DATASETS=msdwild \
+    ONLY='fixednoam_ebf|spkcounting|headoff|overlaploss3' \
     ./scripts/run_infer_adapt_2500h.sh
 ```
 
+Then the CPU half, once, in its own shell. It needs ~130 GB free *on top
+of* whatever the GPU lanes are using, so overlap it with the above only if
+the box has that to spare:
+
+```bash
+DATASETS=ramc ./scripts/run_infer_adapt_2500h.sh
+```
+
+Not used, on purpose: `--fallback-cpu-oom`. Its CPU retry has no memory
+ceiling and can trigger an OS-level OOM that kills unrelated processes
+rather than just itself. For a runaway guard set `RAMC_MAX_INPUT_FRAMES`
+instead — it *skips* over-long recordings, which makes the DER a subset
+number, and the script warns when that happens.
+
+### Everything else
+
 Resumable: `infer.py` skips any recording whose RTTM already exists, and
 the script skips a run outright once its output holds one RTTM per
-`wav.scp` line. Ctrl-C costs only the recording in flight. A DER summary
+`wav.scp` line. Ctrl-C costs only the recording in flight (the lock is
+released on exit, and a lock whose owner died is reclaimed). A DER summary
 table prints at the end.
 
-Other knobs: `DATASETS=ramc` (RAMC only — 43 files, quick smoke test),
-`MAX_CHECKPOINTS_TO_AVERAGE`, `NUM_THREADS`, `CFG_ROOT`, and the env
-paths `DIAPER_ENV` / `DSCORE_SRC` / `DSCORE_ENV`.
+Other knobs: `MAX_CHECKPOINTS_TO_AVERAGE`, `NUM_THREADS` (GPU runs),
+`RAMC_CPU_THREADS` (default 8), `RAMC_INFER_DEVICE`, `RAMC_LOCK_TIMEOUT`,
+`LOG_DIR` (holds the lock), `CFG_ROOT`, and the env paths `DIAPER_ENV` /
+`DSCORE_SRC` / `DSCORE_ENV`.
+
+`infer.py`'s `--gpu` is a **device flag**, not a process count like
+`train.py`'s: `>= 1` means CUDA, anything lower means CPU.
 
 `ONLY` is an **anchored** extended regex over the labels, not a substring
 — `ONLY=fixednoam` matches nothing, `ONLY='fixednoam.*'` matches both.
@@ -132,9 +175,14 @@ notice its `epochs740-750` output lives in `msdwild_test_full_pred/` and
   resolve to `epochs 90-100`, correct adapt dirs, correct per-dataset
   postprocessing.
 - The DER column index (`awk $4`) against a real dscore log.
-- Two real inference runs on a 2-recording MSDWild subset, covering both
-  encoder types and both postprocessing paths. RTTMs landed exactly where
-  the scoring glob looks for them.
+- Three real inference runs on a 2-recording subset, covering both encoder
+  types, both postprocessing paths, and the `--gpu 0` CPU path. RTTMs
+  landed exactly where the scoring glob looks for them.
+- The RAMC lock, functionally: a lock held by a **live** pid blocks the
+  run and reports `FAIL (RAMC lock timeout)` instead of proceeding; a lock
+  held by a **dead** pid is reclaimed; the lock is released after a failed
+  inference; and the exit trap does not steal a lock owned by another
+  shell.
 - **The one thing that could have failed silently:**
   `average_checkpoints` loads with `strict=True`, so an adapt checkpoint
   carrying a counting head the infer config does not declare would hard-
@@ -144,8 +192,11 @@ notice its `epochs740-750` output lives in `msdwild_test_full_pred/` and
 
 ## Caveats
 
-- **Server only.** RAMC inference at `num_frames: -1` does not fit this
-  machine's 6 GB GPU (0/43 files) — architectural, not a bug.
+- **Server only, and RAMC is CPU-only even there.** RAMC whole-recording
+  inference at `subsampling: 5` needs ~120–130 GB RAM; it does not fit a
+  V100, let alone this laptop's 6 GB GPU (0/43 files). Architectural
+  (O(T²) whole-recording self-attention, no chunking, by paper design),
+  not a bug. See the memory note `diaper_ramc_infer_hardware_limit`.
 - The archive unpacks *next to*, not over, the finetune outputs already
   on the server: paths inside are relative to `experiments/10attractors`
   and every entry is `<experiment>/models/checkpoint_NN.tar`.
