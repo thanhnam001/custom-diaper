@@ -191,9 +191,22 @@ def pit_loss_multispk(
     # Pick first dimensions, in case they mismatch because the data has more
     # speakers than the model has attractors
     min_dim = min(attractors_logits.shape[1], spk_labels.shape[1])
+    # The existence target is mostly zeros -- n_attractors slots against the
+    # 2-4 speakers a recording actually has -- so an unweighted BCE biases
+    # this head toward "absent", and infer.py thresholds it directly to pick
+    # how many speakers to emit. pos_weight ~ n_attractors/mean_n_speakers
+    # balances the two classes; 1.0 reproduces the original unweighted loss
+    # exactly (pos_weight=None), so existing configs are unaffected.
+    existence_pos_weight = getattr(
+        args, 'attractor_existence_pos_weight', 1.0)
     attractor_existence_loss = F.binary_cross_entropy_with_logits(
         attractors_logits[:, :min_dim],
         spk_labels[:, :min_dim],
+        pos_weight=(
+            torch.tensor(existence_pos_weight,
+                         device=attractors_logits.device,
+                         dtype=attractors_logits.dtype)
+            if existence_pos_weight != 1.0 else None),
         reduction='mean')
 
     # Same attractor-slot-aligned existence target as above, zero-padded out

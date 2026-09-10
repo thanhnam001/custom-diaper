@@ -627,6 +627,18 @@ def parse_arguments() -> SimpleNamespace:
                         help='weighting parameter for activation loss DER')
     parser.add_argument('--attractor-existence-loss-weight', default=1.0,
                         type=float, help='weighting parameter')
+    parser.add_argument('--attractor-existence-pos-weight', default=1.0,
+                        type=float,
+                        help='pos_weight for the attractor-existence BCE '
+                        '(NOT the same as --attractor-existence-loss-weight, '
+                        'which scales the whole term against the other '
+                        'losses). This rebalances present- vs absent-speaker '
+                        'slots *inside* that BCE: the target is mostly zeros '
+                        '(n_attractors slots vs the few speakers actually '
+                        'present), which biases the head toward predicting '
+                        'absent. Set to ~n_attractors/mean_n_speakers to '
+                        'balance the classes. 1.0 (default) is the original '
+                        'unweighted loss.')
     parser.add_argument('--attractor-frame-comparison', default='dotprod',
                         type=str, choices=['dotprod', 'xattention'],
                         help='how are attractors and frame embeddings compared')
