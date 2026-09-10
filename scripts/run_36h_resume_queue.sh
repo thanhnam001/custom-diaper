@@ -1,7 +1,7 @@
 #!/bin/bash
-# 36-hour, 2-GPU queue that RESUMES the 9 2500h-family finetune runs that
-# early-stopped under ~300 epochs (see memory diaper_finetune_epoch_budget_scan.md,
-# produced 2026-09-05). Start it once and leave it:
+# 2-GPU queue that RESUMES 3 of the original 9 2500h-family finetune runs
+# (see memory diaper_finetune_epoch_budget_scan.md, produced 2026-09-05).
+# Start it once and leave it:
 #
 #   mkdir -p logs/36h_resume_queue
 #   nohup ./scripts/run_36h_resume_queue.sh > logs/36h_resume_queue/driver.log 2>&1 &
@@ -13,64 +13,45 @@
 # does not abort by default -- see STRICT_PREFLIGHT).
 #
 #
-# WHY THESE 9, AND WHY NOW
-# ------------------------
-# All 9 stopped because of early_stopping_patience, not because they
-# converged with confidence:
-#   - The conformer_k31 lane (A1-A5) never set early_stopping_patience in its
-#     yaml, so it ran under train.py's bare default of 30 -- a full 3x
-#     shorter than the patience=100 already PROVEN insufficient below.
-#   - The ebf/paperlr_ebf lane (B1, B2, B4) used patience=100.
-#   - B3 (paperlr vanilla MSDWild) also ran under the OLD patience=100; its
-#     yaml was later edited in place to patience=350 specifically BECAUSE of
-#     what this queue is retesting (see that yaml's own comment).
-# The reference case: extending the E-Branchformer(mlp) subsampling-10
-# MSDWild finetune from its patience-30-analogue stop (305 ep) to the full
-# 750-epoch budget bought -1.46 pooled DER for free, with dev_DER staying
-# genuinely flat only from ~epoch 450 onward. So "stopped early on a short
-# patience" has direct local precedent for hiding real, free DER.
+# WHY ONLY A5, A1, B2 (narrowed 2026-09-10 from the original 9)
+# ---------------------------------------------------------------
+# V1/V2 of this queue (memory diaper_36h_resume_queue.md) scored all 9 after
+# large resumed extensions. Decision, by RAMC DER against the paper's ~21
+# published FT reference:
+#   - A2/A3/A4/B4/B1 are all >21 DER (23.2-23.7 at V2) -- at or worse than
+#     the paper's own number, not worth more budget.
+#   - A5 (16.77) and B2 (17.87) are already well under both the paper and
+#     the old 18.68 local record, and still moving -- these two get the
+#     budget.
+#   - B3 (paperlr vanilla MSDWild) is already at an epoch range comparable
+#     to the published weight, and V1->V2 moved DER <0.5 over ~300 extra
+#     epochs -- no real potential left, dropped.
+#   - A1 (conformer MSDWild) is kept: still showing room to improve.
+# All three stopped on their raised patience (150/200), not on a genuine
+# dev-metric plateau -- see the "NO PER-STAGE WALL-CLOCK CAP" note below.
 #
 #
-# LANE LAYOUT AND ORDER -- BY VALUE, so a slow box truncates the tail
-# --------------------------------------------------------------------
-# Lane A (gpu 0): conformer_k31 family, cheapest per epoch, 5 runs.
-#   1. RAMC (base)         2. RAMC @ subsampling5   3. MSDWild (base)
-#   4. RAMC @ lr 1e-5      5. RAMC @ lr 3e-6
-# Lane B (gpu 1): ebf / paperlr family, pricier per epoch, 4 runs.
-#   1. paperlr_ebf RAMC (base, architecture-matched-to-paper lineage)
-#   2. fixednoam_ebf RAMC @ subsampling5
-#   3. paperlr vanilla MSDWild (base)
-#   4. fixednoam_ebf RAMC @ lr 1e-5
+# LANE LAYOUT AND ORDER
+# ----------------------
+# Lane A (gpu 0): conformer_k31, 2 runs -- RAMC @ subsampling5, then MSDWild.
+# Lane B (gpu 1): ebf, 1 run -- RAMC @ subsampling5.
 # RAMC before MSDWild throughout: RAMC (43 files) resolves 2-3 DER effects,
 # pooled MSDWild resolves nothing below ~1.5 (diaper_der_statistical_power).
 #
 #
-# PER-STAGE TIME BUDGET, NOT JUST RAISED PATIENCE
+# NO PER-STAGE WALL-CLOCK CAP (removed 2026-09-10)
 # -------------------------------------------------
-# Unlike the 5-day queue (which had days to spare and let patience alone
-# decide when a stage ends), this window is a hard 36 h across 2 GPUs, so
-# every stage is wrapped in `timeout`. train.py checkpoints every epoch and
-# auto-resumes, so a timeout-kill is exactly as safe as a crash: whatever
-# epoch it reached is a real, keepable improvement over the original
-# early-stopped checkpoint, even if raised patience never actually fires.
-#
-# Budgets below assume ~1.6 min/epoch (RAMC) / ~2.8 min/epoch (MSDWild) for
-# the conformer_k31 lane -- MEASURED on this exact lineage during the 5-day
-# queue (diaper_fixednoam_conformer_queue.md). The ebf/paperlr lane's costs
-# are EXTRAPOLATED (not directly measured) with a 1.3x safety multiplier,
-# and subsampling5 stages get ~2x for the doubled token count. Lane totals
-# are sized to ~32-34h, leaving 2-4h of buffer per lane for setup, the two
-# inline MSDWild inference stages, and slop in the estimates above.
-#
-# CALIBRATE EARLY: after each lane's first stage has run ~2h, check real
-# throughput --
-#   ls -l --time-style=full-iso <output_path>/models | tail -5
-# -- and if it's wildly different from the assumption, edit this file's
-# *_TIMEOUT_MIN values (or export the env var overrides below) before the
-# mismatch compounds across 4-5 stages. There is no automatic recalibration.
-#
-# Every *_TIMEOUT_MIN is overridable, e.g.:
-#   A1_TIMEOUT_MIN=300 ./scripts/run_36h_resume_queue.sh
+# V1/V2 of this queue (see memory diaper_36h_resume_queue.md) showed every
+# stage's dev_activation_loss_DER flat at cutoff with epochs-since-best well
+# under its raised patience (150/200) -- i.e. every stage so far was bounded
+# by the timeout, never by patience or a genuine dev-metric plateau. Real
+# (dscore) test DER kept moving between rounds regardless, on a metric the
+# dev proxy can't see (diaper_ramc_error_structure.md's collapse-prone
+# files). So each stage below now just runs to ITS OWN
+# --early-stopping-patience and stops there -- no artificial cap to
+# recalibrate, no risk of cutting off a stage mid-improvement. train.py
+# checkpoints every epoch and auto-resumes, so re-running this script is
+# always safe/cheap regardless of how long a previous stage ran.
 #
 #
 # ENV KNOBS (subset of run_5day_queue.sh's; same meanings)
@@ -83,8 +64,6 @@
 #   SKIP_PREFLIGHT=1          don't check for resumable checkpoints first
 #   STRICT_PREFLIGHT=1        abort a lane if any of its checkpoints are missing
 #   LOG_DIR                   default logs/36h_resume_queue
-#   A1_TIMEOUT_MIN .. A5_TIMEOUT_MIN, B1_TIMEOUT_MIN .. B4_TIMEOUT_MIN
-#                             per-stage wall-clock cap in minutes
 
 LANE_A_GPU="${LANE_A_GPU:-0}"
 LANE_B_GPU="${LANE_B_GPU:-1}"
@@ -102,19 +81,6 @@ MAX_CHECKPOINTS_TO_AVERAGE="${MAX_CHECKPOINTS_TO_AVERAGE:-10}"
 
 CNF_DIR=models/10attractors/SC_LibriSpeech_2spk_2500h_fixednoam_conformer_k31
 EBF_DIR=models/10attractors/SC_LibriSpeech_2spk_2500h_fixednoam_ebf
-PLR_DIR=models/10attractors/SC_LibriSpeech_2spk_2500h_paperlr
-PLE_DIR=models/10attractors/SC_LibriSpeech_2spk_2500h_paperlr_ebranchformer
-
-# Per-stage wall-clock caps, minutes (see header for the reasoning).
-A1_TIMEOUT_MIN="${A1_TIMEOUT_MIN:-480}"   # conformer_k31 MSDWild
-A2_TIMEOUT_MIN="${A2_TIMEOUT_MIN:-420}"   # conformer_k31 RAMC
-A3_TIMEOUT_MIN="${A3_TIMEOUT_MIN:-270}"   # conformer_k31 RAMC lr1e-5
-A4_TIMEOUT_MIN="${A4_TIMEOUT_MIN:-270}"   # conformer_k31 RAMC lr3e-6
-A5_TIMEOUT_MIN="${A5_TIMEOUT_MIN:-480}"   # conformer_k31 RAMC sub5
-B1_TIMEOUT_MIN="${B1_TIMEOUT_MIN:-300}"   # fixednoam_ebf RAMC lr1e-5
-B2_TIMEOUT_MIN="${B2_TIMEOUT_MIN:-600}"   # fixednoam_ebf RAMC sub5
-B3_TIMEOUT_MIN="${B3_TIMEOUT_MIN:-540}"   # paperlr vanilla MSDWild
-B4_TIMEOUT_MIN="${B4_TIMEOUT_MIN:-600}"   # paperlr_ebf RAMC
 
 mkdir -p "$LOG_DIR"
 RAMC_LOCK="${LOG_DIR}/.ramc_infer.lock"
@@ -216,11 +182,9 @@ preflight_resume () {
 }
 
 # ---------------------------------------------------------------------------
-# resume_stage <label> <gpu> <cfg> <output_path> <logfile> <timeout_min> [extra args...]
-# Like run_5day_queue.sh's train_stage, but time-boxed. A timeout kill (rc
-# 124) is treated as a normal, expected end of this stage -- NOT a failure --
-# since the point is exactly to stop after a bounded amount of extra
-# training, whether or not raised patience fires first.
+# resume_stage <label> <gpu> <cfg> <output_path> <logfile> [extra args...]
+# Like run_5day_queue.sh's train_stage: runs until train.py's own
+# early-stopping patience (or max_epochs) ends it -- no wall-clock cap.
 #
 # init_model_path override -- WHY THIS MATTERS FOR A RESUME, NOT JUST A
 # FRESH RUN: diaper/train.py runs `if args.init_model_path != '':
@@ -248,7 +212,7 @@ preflight_resume () {
 # what forcing '' unconditionally would risk.
 # ---------------------------------------------------------------------------
 resume_stage () {
-    local label="$1" gpu="$2" cfg="$3" output_path="$4" logfile="$5" timeout_min="$6"; shift 6
+    local label="$1" gpu="$2" cfg="$3" output_path="$4" logfile="$5"; shift 5
     if [ ! -f "$cfg" ]; then
         log "SKIP $label -- config not found: $cfg"; return 1
     fi
@@ -265,16 +229,12 @@ resume_stage () {
         log "      (or crash there too if that's also missing on this server)"
     fi
 
-    log "START $label gpu=$gpu cfg=$cfg cap=${timeout_min}min"
-    timeout "${timeout_min}m" env CUDA_VISIBLE_DEVICES="$gpu" "${PY[@]}" diaper/train.py -c "$cfg" \
+    log "START $label gpu=$gpu cfg=$cfg (no wall-clock cap -- runs to its own patience)"
+    env CUDA_VISIBLE_DEVICES="$gpu" "${PY[@]}" diaper/train.py -c "$cfg" \
         --gpu 1 "${init_args[@]}" "$@" >> "$logfile" 2>&1
     local rc=$?
     if [ $rc -eq 0 ]; then
-        log "DONE  $label (patience fired or max_epochs reached before the time cap)"
-        return 0
-    elif [ $rc -eq 124 ]; then
-        log "CAPPED $label -- hit its ${timeout_min}min wall-clock cap, moving on"
-        log "       (checkpoint saved; safe to extend further later, same command)"
+        log "DONE  $label (patience fired or max_epochs reached)"
         return 0
     else
         log "FAIL  $label (exit $rc) -- see $logfile"
@@ -282,10 +242,10 @@ resume_stage () {
             log "      not retrying (STOP requested)"; return 1
         fi
         log "RETRY $label once (transient blips are nearly free -- train.py resumes)"
-        timeout "${timeout_min}m" env CUDA_VISIBLE_DEVICES="$gpu" "${PY[@]}" diaper/train.py -c "$cfg" \
+        env CUDA_VISIBLE_DEVICES="$gpu" "${PY[@]}" diaper/train.py -c "$cfg" \
             --gpu 1 "${init_args[@]}" "$@" >> "$logfile" 2>&1
         rc=$?
-        if [ $rc -eq 0 ] || [ $rc -eq 124 ]; then
+        if [ $rc -eq 0 ]; then
             log "DONE  $label (after retry)"; return 0
         fi
         log "FAIL  $label (exit $rc, after retry) -- see $logfile"
@@ -343,7 +303,7 @@ infer_stage () {
     fi
     local collar_args=() collar_label="0"
     if [ -n "$collar" ]; then collar_args=(--collar "$collar"); collar_label="$collar"; fi
-    local score_log="${rttms_dir}/dscore_collar${collar_label}_resumed.log"
+    local score_log="${rttms_dir}/dscore_collar${collar_label}_epochs${epochs_range}.log"
     "${DSCORE_PY[@]}" "$DSCORE_SRC/score.py" "${collar_args[@]}" \
         -r "$ref_rttm" -s "${sys_rttms[@]}" > "$score_log" 2>&1
     log "SCORED $label (${#sys_rttms[@]} files) -> $score_log"
@@ -365,58 +325,38 @@ ramc_infer_bg () {
 
 # ===========================================================================
 # LANE A -- conformer_k31 (gpu $LANE_A_GPU)
+# Narrowed 2026-09-10 to A5 + A1 only (see memory diaper_36h_resume_queue.md):
+# A2/A3/A4 are all >21 DER, past the paper's ~21 RAMC FT reference and not
+# worth more budget; A5 is already <17 and still moving.
 # ===========================================================================
 lane_A () {
     local GPU="$1" P="${LOG_DIR}/laneA" JOBS
     mkdir -p "$P"; JOBS="$P/.ramc_jobs"; : > "$JOBS"
 
-    local out_ramc out_msd out_lr1e5 out_lr3e6 out_sub5
-    out_ramc=$(yaml_get output_path "$CNF_DIR/finetune_ramc_10spks.yaml")
+    local out_msd out_sub5
     out_msd=$(yaml_get output_path "$CNF_DIR/finetune_msdwild_10spks.yaml")
-    out_lr1e5="${out_ramc}_lr1e-5"
-    out_lr3e6="${out_ramc}_lr3e-6"
-    out_sub5="${out_ramc}_sub5"
+    out_sub5="$(yaml_get output_path "$CNF_DIR/finetune_ramc_10spks.yaml")_sub5"
 
-    log "LANE A on gpu $GPU (conformer_k31)"
+    log "LANE A on gpu $GPU (conformer_k31: A5 RAMC_sub5, A1 MSDWild)"
     if [ "${SKIP_PREFLIGHT:-0}" != "1" ]; then
-        preflight_resume "A2 RAMC"        "$out_ramc"  || { log "LANE A ABORTED"; return 1; }
-        preflight_resume "A5 RAMC_sub5"   "$out_sub5"  || { log "LANE A ABORTED"; return 1; }
-        preflight_resume "A1 MSDWild"     "$out_msd"   || { log "LANE A ABORTED"; return 1; }
-        preflight_resume "A3 RAMC_lr1e-5" "$out_lr1e5" || { log "LANE A ABORTED"; return 1; }
-        preflight_resume "A4 RAMC_lr3e-6" "$out_lr3e6" || { log "LANE A ABORTED"; return 1; }
+        preflight_resume "A5 RAMC_sub5" "$out_sub5" || { log "LANE A ABORTED"; return 1; }
+        preflight_resume "A1 MSDWild"   "$out_msd"  || { log "LANE A ABORTED"; return 1; }
     fi
 
-    # 1. RAMC base -- highest value, first in the lane
-    resume_stage "A2 RAMC (base)" "$GPU" "$CNF_DIR/finetune_ramc_10spks.yaml" "$out_ramc" \
-        "$P/1_ramc.log" "$A2_TIMEOUT_MIN" --early-stopping-patience 150
-    ramc_infer_bg "A2 RAMC" "$CNF_DIR/infer_ramc.yaml" \
-        "$out_ramc/models" "$out_ramc/ramc_test_pred" 1 "$P/1_ramc_infer.log" "$JOBS"
-
-    # 2. RAMC @ subsampling5 -- the proven-biggest RAMC lever elsewhere
+    # 1. RAMC @ subsampling5 -- the proven-biggest RAMC lever, already <17 DER.
+    #    Was at 309/500 last round -- still under its yaml's max_epochs=500,
+    #    so no override needed yet (unlike B2, which was already at the cap).
     resume_stage "A5 RAMC @ subsampling5" "$GPU" "$CNF_DIR/finetune_ramc_10spks.yaml" "$out_sub5" \
-        "$P/2_ramc_sub5.log" "$A5_TIMEOUT_MIN" --early-stopping-patience 150 \
+        "$P/2_ramc_sub5.log" --early-stopping-patience 150 \
         --subsampling 5 --num-frames 1200 --train-batchsize 16 --output-path "$out_sub5"
     ramc_infer_bg "A5 RAMC sub5" "$CNF_DIR/infer_ramc.yaml" \
         "$out_sub5/models" "$out_sub5/ramc_test_pred" 1 "$P/2_ramc_sub5_infer.log" "$JOBS"
 
-    # 3. MSDWild base -- fits one GPU, scored inline
+    # 2. MSDWild base -- still improving, fits one GPU, scored inline
     resume_stage "A1 MSDWild (base)" "$GPU" "$CNF_DIR/finetune_msdwild_10spks.yaml" "$out_msd" \
-        "$P/3_msdwild.log" "$A1_TIMEOUT_MIN" --early-stopping-patience 150
+        "$P/3_msdwild.log" --early-stopping-patience 150
     infer_stage "A1 MSDWild" "$GPU" "$CNF_DIR/infer_msdwild.yaml" \
         "$out_msd/models" "$out_msd/msdwild_test_pred" "0.25" 11 "$P/3_msdwild_infer.log"
-
-    # 4-5. RAMC LR-sweep fillers -- lowest value, last in the lane
-    resume_stage "A3 RAMC @ lr1e-5" "$GPU" "$CNF_DIR/finetune_ramc_10spks.yaml" "$out_lr1e5" \
-        "$P/4_ramc_lr1e-5.log" "$A3_TIMEOUT_MIN" --early-stopping-patience 150 \
-        --lr 1e-5 --output-path "$out_lr1e5"
-    ramc_infer_bg "A3 RAMC lr1e-5" "$CNF_DIR/infer_ramc.yaml" \
-        "$out_lr1e5/models" "$out_lr1e5/ramc_test_pred" 1 "$P/4_ramc_lr1e-5_infer.log" "$JOBS"
-
-    resume_stage "A4 RAMC @ lr3e-6" "$GPU" "$CNF_DIR/finetune_ramc_10spks.yaml" "$out_lr3e6" \
-        "$P/5_ramc_lr3e-6.log" "$A4_TIMEOUT_MIN" --early-stopping-patience 150 \
-        --lr 3e-6 --output-path "$out_lr3e6"
-    ramc_infer_bg "A4 RAMC lr3e-6" "$CNF_DIR/infer_ramc.yaml" \
-        "$out_lr3e6/models" "$out_lr3e6/ramc_test_pred" 1 "$P/5_ramc_lr3e-6_infer.log" "$JOBS"
 
     local jp
     while read -r jp; do [ -n "$jp" ] && wait "$jp" 2>/dev/null; done < "$JOBS"
@@ -424,55 +364,35 @@ lane_A () {
 }
 
 # ===========================================================================
-# LANE B -- ebf / paperlr (gpu $LANE_B_GPU)
+# LANE B -- ebf (gpu $LANE_B_GPU)
+# Narrowed 2026-09-10 to B2 only: B4/B1 are >21 DER (past the paper's ~21
+# RAMC FT reference); B3 already sits at an epoch range comparable to the
+# published weight and moved <0.5 DER over 300 extra epochs -- no potential
+# left there. B2 is already <18 and still moving, and at its max_epochs cap
+# (500/500) so it needs the --max-epochs override below to continue at all.
 # ===========================================================================
 lane_B () {
     local GPU="$1" P="${LOG_DIR}/laneB" JOBS
     mkdir -p "$P"; JOBS="$P/.ramc_jobs"; : > "$JOBS"
 
-    local out_ple_ramc out_ebf_ramc out_ebf_lr1e5 out_ebf_sub5 out_plr_msd
-    out_ple_ramc=$(yaml_get output_path "$PLE_DIR/finetune_ramc_10spks.yaml")
+    local out_ebf_ramc out_ebf_sub5
     out_ebf_ramc=$(yaml_get output_path "$EBF_DIR/finetune_ramc_10spks.yaml")
-    out_ebf_lr1e5="${out_ebf_ramc}_lr1e-5"
     out_ebf_sub5="${out_ebf_ramc}_sub5"
-    out_plr_msd=$(yaml_get output_path "$PLR_DIR/finetune_msdwild_10spks.yaml")
 
-    log "LANE B on gpu $GPU (ebf / paperlr)"
+    log "LANE B on gpu $GPU (ebf: B2 RAMC_sub5)"
     if [ "${SKIP_PREFLIGHT:-0}" != "1" ]; then
-        preflight_resume "B4 paperlr_ebf RAMC"    "$out_ple_ramc"  || { log "LANE B ABORTED"; return 1; }
-        preflight_resume "B2 fixednoam_ebf sub5"  "$out_ebf_sub5"  || { log "LANE B ABORTED"; return 1; }
-        preflight_resume "B3 paperlr MSDWild"     "$out_plr_msd"   || { log "LANE B ABORTED"; return 1; }
-        preflight_resume "B1 fixednoam_ebf lr1e-5" "$out_ebf_lr1e5" || { log "LANE B ABORTED"; return 1; }
+        preflight_resume "B2 fixednoam_ebf sub5" "$out_ebf_sub5" || { log "LANE B ABORTED"; return 1; }
     fi
 
-    # 1. paperlr_ebf RAMC base -- architecture-matched-to-paper lineage
-    resume_stage "B4 paperlr_ebf RAMC (base)" "$GPU" "$PLE_DIR/finetune_ramc_10spks.yaml" "$out_ple_ramc" \
-        "$P/1_ple_ramc.log" "$B4_TIMEOUT_MIN" --early-stopping-patience 200
-    ramc_infer_bg "B4 paperlr_ebf RAMC" "$PLE_DIR/infer_ramc.yaml" \
-        "$out_ple_ramc/models" "$out_ple_ramc/ramc_test_pred" 1 "$P/1_ple_ramc_infer.log" "$JOBS"
-
-    # 2. fixednoam_ebf RAMC @ subsampling5 -- the proven-biggest RAMC lever
+    # 1. fixednoam_ebf RAMC @ subsampling5 -- already <18 DER, still moving.
+    #    Was capped at max_epochs=500 (v2 result ended exactly there) -- a
+    #    bare resume would be a no-op, so bumped +150 (500->650) to give it
+    #    room without overcommitting budget.
     resume_stage "B2 fixednoam_ebf RAMC @ subsampling5" "$GPU" "$EBF_DIR/finetune_ramc_10spks.yaml" "$out_ebf_sub5" \
-        "$P/2_ebf_ramc_sub5.log" "$B2_TIMEOUT_MIN" --early-stopping-patience 200 \
+        "$P/2_ebf_ramc_sub5.log" --early-stopping-patience 200 --max-epochs 650 \
         --subsampling 5 --num-frames 1200 --train-batchsize 16 --output-path "$out_ebf_sub5"
     ramc_infer_bg "B2 ebf RAMC sub5" "$EBF_DIR/infer_ramc.yaml" \
         "$out_ebf_sub5/models" "$out_ebf_sub5/ramc_test_pred" 1 "$P/2_ebf_ramc_sub5_infer.log" "$JOBS"
-
-    # 3. paperlr vanilla MSDWild base -- NO patience override: this run's own
-    #    yaml already raised early_stopping_patience to 350 for exactly this
-    #    reason (see finetune_msdwild_10spks.yaml's own comment). Will very
-    #    likely be capped by the timeout, not by patience -- that's expected.
-    resume_stage "B3 paperlr MSDWild (base)" "$GPU" "$PLR_DIR/finetune_msdwild_10spks.yaml" "$out_plr_msd" \
-        "$P/3_plr_msdwild.log" "$B3_TIMEOUT_MIN"
-    infer_stage "B3 paperlr MSDWild" "$GPU" "$PLR_DIR/infer_msdwild.yaml" \
-        "$out_plr_msd/models" "$out_plr_msd/msdwild_test_pred" "0.25" 11 "$P/3_plr_msdwild_infer.log"
-
-    # 4. fixednoam_ebf RAMC @ lr1e-5 -- lowest value, last in the lane
-    resume_stage "B1 fixednoam_ebf RAMC @ lr1e-5" "$GPU" "$EBF_DIR/finetune_ramc_10spks.yaml" "$out_ebf_lr1e5" \
-        "$P/4_ebf_ramc_lr1e-5.log" "$B1_TIMEOUT_MIN" --early-stopping-patience 200 \
-        --lr 1e-5 --output-path "$out_ebf_lr1e5"
-    ramc_infer_bg "B1 ebf RAMC lr1e-5" "$EBF_DIR/infer_ramc.yaml" \
-        "$out_ebf_lr1e5/models" "$out_ebf_lr1e5/ramc_test_pred" 1 "$P/4_ebf_ramc_lr1e-5_infer.log" "$JOBS"
 
     local jp
     while read -r jp; do [ -n "$jp" ] && wait "$jp" 2>/dev/null; done < "$JOBS"
@@ -492,9 +412,9 @@ if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
     unset CUDA_VISIBLE_DEVICES
 fi
 
-log "36h resume queue starting"
-log "  lane A (conformer_k31) gpu=$LANE_A_GPU  budget ~$(( (A1_TIMEOUT_MIN+A2_TIMEOUT_MIN+A3_TIMEOUT_MIN+A4_TIMEOUT_MIN+A5_TIMEOUT_MIN) / 60 ))h"
-log "  lane B (ebf/paperlr)   gpu=$LANE_B_GPU  budget ~$(( (B1_TIMEOUT_MIN+B2_TIMEOUT_MIN+B3_TIMEOUT_MIN+B4_TIMEOUT_MIN) / 60 ))h"
+log "resume queue starting (no wall-clock cap -- each stage runs to its own patience)"
+log "  lane A (conformer_k31) gpu=$LANE_A_GPU"
+log "  lane B (ebf)           gpu=$LANE_B_GPU"
 log "  RAMC scoring device=$RAMC_INFER_DEVICE (serialized across lanes)"
 log "  logs: $LOG_DIR"
 
