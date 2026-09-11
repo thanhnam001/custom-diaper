@@ -33,15 +33,22 @@
 # WHICH RUNS GET PACKED
 # ----------------------
 # Output paths are read from each lineage's own yaml, not hardcoded, so this
-# follows the configs if the server root moves. Variant suffixes are
-# auto-discovered by globbing, which is how it picks up _sub5 / _lr1e-5 /
-# _lr3e-6 (36h queue) and _posw3.0 / _posw5.0 (pos_weight queue) without
-# knowing the values in advance -- including whatever POSW_A/POSW_B you
-# actually ran.
+# follows the configs if the server root moves.
 #
-#   QUEUE=36h    the 4 fixed-Noam / paperlr lineages, *_posw* excluded
-#   QUEUE=posw   only the paperlr-ebranchformer MSDWild *_posw* arms
+#   QUEUE=36h    exactly the three runs run_36h_resume_queue.sh actually
+#                runs: A5 (conformer RAMC @ sub5), A1 (same lineage,
+#                MSDWild), B2 (fixed-Noam ebf RAMC @ sub5). That queue was
+#                narrowed to these on 2026-09-10; A2/A3/A4/B1/B3/B4 were
+#                dropped but their directories still exist from earlier
+#                rounds, so this does NOT glob for variants -- doing so
+#                would pack 13 runs instead of 3.
+#   QUEUE=posw   the paperlr-ebranchformer MSDWild *_posw* arms, found by
+#                globbing so it picks up whatever POSW_A/POSW_B you ran.
 #   QUEUE=all    both (default)
+#
+#   ALL_VARIANTS=1  with QUEUE=36h|all, pack every finetune variant under
+#                   those lineages instead of the narrowed three -- the
+#                   historical superset, for a final bring-everything-home.
 #
 # A run that has not started yet is reported NOT RUN and skipped, not fatal
 # -- the pos_weight queue may legitimately not have produced anything when
@@ -104,12 +111,25 @@ add_path () {
     return 0
 }
 
-# pack_run <run-dir>
+# out_of <cfg> -> that config's output_path, rebased onto EXP_ROOT.
+# Rebasing by the last two components, <run>/models_finetuneXXX, is a no-op
+# on the server but lets you point EXP_ROOT at a local checkout and DRY_RUN
+# the whole thing against real directories before trusting it.
+out_of () {
+    local abs
+    abs=$(yaml_get output_path "$1" 2>/dev/null) || return 1
+    [ -n "$abs" ] || return 1
+    printf '%s/%s/%s\n' "$EXP_ROOT" \
+        "$(basename "$(dirname "$abs")")" "$(basename "$abs")"
+}
+
+# pack_run <run-dir> [queue-label]
 # Packs the newest $KEEP checkpoints plus every dscore log under the run's
 # *_test_pred directories.
 pack_run () {
-    local dir="$1" label="${1#"$EXP_ROOT"/}"
+    local dir="$1" tag="${2:-}" label="${1#"$EXP_ROOT"/}"
     local b0=$BYTES n_ck=0 n_log=0 sz
+    [ -n "$tag" ] && label="$tag  $label"
 
     if [ ! -d "$dir/models" ]; then
         say "  NOT RUN   $label  (no models/ dir)"
@@ -155,21 +175,15 @@ pack_run () {
 #                 excluding *_posw* (those belong to the pos_weight queue)
 #   mode posw  -> only the *_posw* variants
 scan_config () {
-    local cfg="$1" mode="$2" base abs d
+    local cfg="$1" mode="$2" base d
     [ -f "$cfg" ] || { say "  (no config: $cfg)"; return 0; }
-    abs=$(yaml_get output_path "$cfg")
-    [ -n "$abs" ] || { say "  (no output_path in $cfg)"; return 0; }
-    # Rebase the config's (server-absolute) output_path onto EXP_ROOT by its
-    # last two components, <run>/models_finetuneXXX. On the server that is a
-    # no-op; locally it lets you point EXP_ROOT at this checkout and DRY_RUN
-    # the whole thing against real directories before trusting it.
-    base="$EXP_ROOT/$(basename "$(dirname "$abs")")/$(basename "$abs")"
+    base=$(out_of "$cfg") || { say "  (no output_path in $cfg)"; return 0; }
 
     if [ "$mode" = "posw" ]; then
         local found=0
         for d in "${base}"_posw*; do
             [ -d "$d" ] || continue
-            pack_run "$d"; found=1
+            pack_run "$d" "posw"; found=1
         done
         [ "$found" -eq 1 ] || say "  NOT RUN   ${base#"$EXP_ROOT"/}_posw*  (queue has not produced anything yet)"
         return 0
@@ -183,6 +197,47 @@ scan_config () {
     done
 }
 
+# ---------------------------------------------------------------------------
+# scan_36h -- mirrors run_36h_resume_queue.sh's lane definitions EXACTLY.
+#
+# That queue was narrowed on 2026-09-10 to three runs: lane A does A5 (the
+# conformer RAMC finetune at subsampling 5) then A1 (the same lineage's
+# MSDWild finetune), and lane B does B2 (the fixed-Noam E-Branchformer RAMC
+# finetune at subsampling 5). A2/A3/A4/B1/B3/B4 were dropped -- they are all
+# above the paper's ~21 RAMC reference, or out of headroom.
+#
+# Those six dropped runs still have directories on disk from earlier rounds,
+# so globbing <base>_* would pack 13 runs instead of 3 and quadruple the
+# archive with weights this queue never touched. Set ALL_VARIANTS=1 when you
+# deliberately want that historical superset.
+# ---------------------------------------------------------------------------
+scan_36h () {
+    local cnf_ramc cnf_msd ebf_ramc
+
+    if [ "${ALL_VARIANTS:-0}" = "1" ]; then
+        say "  (ALL_VARIANTS=1 -- every finetune variant under these lineages,"
+        say "   not just the three the narrowed queue runs)"
+        scan_config "$CNF_DIR/finetune_ramc_10spks.yaml"    base
+        scan_config "$CNF_DIR/finetune_msdwild_10spks.yaml" base
+        scan_config "$EBF_DIR/finetune_ramc_10spks.yaml"    base
+        scan_config "$EBF_DIR/finetune_msdwild_10spks.yaml" base
+        scan_config "$PLR_DIR/finetune_msdwild_10spks.yaml" base
+        scan_config "$PLE_DIR/finetune_ramc_10spks.yaml"    base
+        return 0
+    fi
+
+    cnf_ramc=$(out_of "$CNF_DIR/finetune_ramc_10spks.yaml") || cnf_ramc=""
+    cnf_msd=$(out_of "$CNF_DIR/finetune_msdwild_10spks.yaml") || cnf_msd=""
+    ebf_ramc=$(out_of "$EBF_DIR/finetune_ramc_10spks.yaml") || ebf_ramc=""
+
+    if [ -n "$cnf_ramc" ]; then pack_run "${cnf_ramc}_sub5" "A5"
+    else say "  (no config: $CNF_DIR/finetune_ramc_10spks.yaml)"; fi
+    if [ -n "$cnf_msd" ]; then pack_run "$cnf_msd" "A1"
+    else say "  (no config: $CNF_DIR/finetune_msdwild_10spks.yaml)"; fi
+    if [ -n "$ebf_ramc" ]; then pack_run "${ebf_ramc}_sub5" "B2"
+    else say "  (no config: $EBF_DIR/finetune_ramc_10spks.yaml)"; fi
+}
+
 say "DiaPer newest-weights pack"
 say "  packed   : $(date '+%Y-%m-%d %H:%M:%S %Z') on $(hostname 2>/dev/null || echo unknown-host)"
 say "  queue    : $QUEUE      KEEP=$KEEP checkpoint(s) per run"
@@ -192,13 +247,8 @@ say "  commit   : $(git rev-parse --short HEAD 2>/dev/null || echo 'not a git ch
 say ""
 
 if [ "$QUEUE" = "36h" ] || [ "$QUEUE" = "all" ]; then
-    say "36h RESUME QUEUE"
-    scan_config "$CNF_DIR/finetune_ramc_10spks.yaml"    base
-    scan_config "$CNF_DIR/finetune_msdwild_10spks.yaml" base
-    scan_config "$EBF_DIR/finetune_ramc_10spks.yaml"    base
-    scan_config "$EBF_DIR/finetune_msdwild_10spks.yaml" base
-    scan_config "$PLR_DIR/finetune_msdwild_10spks.yaml" base
-    scan_config "$PLE_DIR/finetune_ramc_10spks.yaml"    base
+    say "36h RESUME QUEUE (A5, A1, B2 -- the narrowed lane set)"
+    scan_36h
     say ""
 fi
 
