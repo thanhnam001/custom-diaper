@@ -6,10 +6,12 @@ Run from the repo root:
     python scripts/gen_story_queue_configs.py
 
 Writes models/10attractors/SC_LibriSpeech_2spk_2500h_story_A{0..4}/ with six
-to eight yaml files each. Re-running overwrites them, so edit THIS file
-rather than the generated yaml -- the whole point of generating them is that
-the single-variable property below is structural, not something to verify by
-eye afterwards.
+to eight yaml files each. All five arms are generated; the queue runs A1-A4
+by default (see STORY_ARMS in run_4gpu_story_queue.sh).
+
+Re-running overwrites them, so edit THIS file rather than the generated
+yaml -- the whole point of generating them is that the single-variable
+property below is structural, not something to verify by eye afterwards.
 
 WHY THIS EXISTS
 ===============
@@ -27,9 +29,9 @@ latents2attractors map, the attractor objective AND the optimizer budget
 into one number, and `mlp` + the diversity loss have literally never been
 run apart from each other.
 
-These five arms are fresh three-stage pipelines (pretrain -> adapt ->
-finetune) sharing one identical recipe, each changing exactly one factor
-from its comparison partner.
+The arms below are fresh three-stage pipelines (pretrain -> adapt ->
+finetune) sharing one identical recipe, so that each comparison changes only
+what it claims to change.
 
 THE DESIGN
 ==========
@@ -43,47 +45,55 @@ map to `mlp` silently switches Le off too, and a naive
 The chain is therefore ordered so Le is already off before the map changes:
 
     arm  encoder        l2a map            Le    diversity
-    A0   self_attention weighted_average   1.0   0.0     <- paper's architecture;
-                                                        SC stages INHERITED
-                                                        from `paperlr`
+    A0   self_attention weighted_average   1.0   0.0     <- the published
+                                                        architecture; NOT
+                                                        queued, see below
     A1   conformer k31  weighted_average   1.0   0.0
     A2   self_attention weighted_average   0.0   0.1
     A3   self_attention mlp                0.0   0.1
     A4   conformer k31  mlp                0.0   0.1     <- proposed system
 
-Every hypothesis gets a single-variable comparison:
+QUEUED BY DEFAULT: A1, A2, A3, A4. A0 is defined but out of scope (below).
 
-    H1  frame encoder       A0 -> A1   (both weighted_average + Le)
-                            A3 -> A4   (both mlp + diversity)   <- replicated
-    H3  attractor objective A0 -> A2   (both self-attn + weighted_average)
-                            Le swapped for the diversity penalty
-    H2  latents2attractors  A2 -> A3   (both self-attn + diversity, Le off
-                                        on both sides)
-    H5  all three           A0 -> A4
+Matched-recipe comparisons available from the queued arms:
 
-H1 being tested at both ends of the chain is a deliberate bonus: it says
-whether the encoder gain is additive with the attractor-branch changes or
-redundant with them.
+    frame encoder      A3 -> A4   frame_encoder_type only (branch = ours)
+    l2a map            A2 -> A3   latents2attractors only (Le off both sides)
+    attractor branch   A1 -> A4   encoder fixed = conformer; the map and the
+                                  objective move together, so this is the
+                                  branch as a PACKAGE
+    resolution         A4, per corpus (H4)
+
+A1 -> A4 and A2 -> A3 together decompose the attractor branch: the package
+effect on a fixed encoder, and the map component on its own. The objective's
+share is then the difference, which is an inference rather than an
+isolation -- isolating it would need a conformer + weighted_average +
+diversity arm, and none is queued.
+
+A1 is also a method in its own right (conformer encoder on the PAPER's
+attractor branch), so it carries a system-level row, not just a control.
 
 `linear` is excluded on purpose -- the paper already reported it worse than
 `weighted_average`, which is also why H2's claim is "the right added
 capacity", not "less constraint".
 
-NOAM, AND WHY A0 IS NOT RETRAINED
-=================================
+NOAM, AND WHY A0 IS OUT OF SCOPE
+================================
 A0 *is* the already-trained `paperlr` lineage: self-attention +
-weighted_average + Le, at 2500h, on the corrected Noam schedule. Retraining
-it would burn ~50 GPU-h to reproduce a result we already have. So A0 reuses
-paperlr's pretrain and adapt checkpoints untouched and only re-runs its
-FINETUNES, because those must sit under the same protocol (lr 1e-5) as
-A1-A4 -- finetuning at the old 1e-6 while the other arms use 1e-5 would
-confound every encoder/objective comparison with a -1.48 DER LR effect,
-which is larger than the effects being measured.
+weighted_average + Le, at 2500h. The baseline for this work is DiaPer AS
+THE AUTHORS SPECIFIED IT, and paperlr already reproduces that recipe
+faithfully -- including the authors' own finetune LR of 1e-6 -- at MSDWild
+18.31 (ep 551-561) and RAMC 20.80 (ep 321-331). Re-finetuning it at OUR
+recipe would mean improving the published baseline's optimizer settings,
+which is the authors' work and not ours.
 
-The consequence: every fresh arm must use paperlr's EXACT pretrain and
-adapt schedule, or A0 stops being a valid anchor. Hence the proven
-512/50000 at batch 128 (pretrain) and 2111/48500 at batch 22 (adapt), not
-re-derived values.
+So A0 is not queued, and paperlr's existing numbers serve as the published
+baseline row directly.
+
+Every fresh arm still uses paperlr's EXACT pretrain and adapt schedule --
+the proven 512/50000 at batch 128 (pretrain) and 2111/48500 at batch 22
+(adapt), not re-derived values -- so the SC stages stay comparable across
+the whole family, including against paperlr itself.
 
 Known wart, to report rather than fix here: that 50,000-step warmup was
 derived assuming 119,160 pretrain chunks, from a *measured* 993 steps/epoch
@@ -125,9 +135,9 @@ MSDWILD_TEST = f'{DATA}/msdwild/kaldi/test'
 RAMC_TEST = f'{DATA}/ramc/kaldi/test'
 
 # Noam at pretrain: paperlr's PROVEN values at batch 128. Deliberately not
-# re-derived -- see "NOAM AT PRETRAIN" in the module docstring. A0 inherits
-# paperlr's already-trained pretrain+adapt, so every fresh arm must use the
-# identical schedule or A0 stops being a valid anchor.
+# re-derived -- see "NOAM, AND WHY A0 IS OUT OF SCOPE" in the module
+# docstring. Every fresh arm uses the identical schedule so the SC stages
+# stay comparable across the family, including against paperlr itself.
 PRETRAIN_NOAM_MODEL_SIZE = 512
 PRETRAIN_NOAM_WARMUP_STEPS = 50000
 # Adapt: the proven paperlr values at batch 22 (peak 9.882e-5).
@@ -256,7 +266,7 @@ ARMS = {
 # so that re-enabling one is a single env var on the queue, but the queue runs
 # only A2/A3/A4 by default -- see STORY_ARMS in run_4gpu_story_queue.sh.
 #
-# A0 and A1 are defined-but-not-queued by design. The baseline for this work
+# A0 is defined-but-not-queued by design. The baseline for this work
 # is DiaPer AS THE AUTHORS SPECIFIED IT, and `paperlr` already reproduces that
 # recipe faithfully -- including the authors' own finetune LR of 1e-6 --
 # scoring MSDWild 18.31 (ep 551-561) and RAMC 20.80 (ep 321-331).
@@ -275,9 +285,15 @@ ARMS = {
 #                       everything else is identical.
 # "The conformer is worth X DER" comes from A3 -> A4, never A4-vs-paperlr.
 #
-# A1 is not queued because its only single-variable partner was A0. The
-# Le -> diversity swap takes its matched-recipe evidence from the 300h sweep
-# (two LR-clean isolated pairs; see research_story.md).
+# A1 IS queued: it is a method in its own right (conformer + the paper's
+# attractor branch) and it is A4's matched-recipe partner for the attractor
+# branch as a package (same encoder, map + objective move together). With
+# A2 -> A3 giving the map alone, the two together decompose the branch.
+#
+# The Le -> diversity swap is therefore bracketed rather than isolated at
+# our recipe (A1 -> A4 = package, A2 -> A3 = map); its isolated
+# matched-recipe evidence comes from the 300h sweep (two LR-clean pairs;
+# see research_story.md).
 #
 # Which arms get which finetunes. MSDWild carries the H1/H2/H3 ablation
 # because it is the multi-speaker benchmark; RAMC is 2-speaker, so only the

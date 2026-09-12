@@ -34,18 +34,24 @@
 #
 #     arm  encoder        l2a map            Le    diversity   queued
 #     A0   self_attention weighted_average   1.0   0.0         no
-#     A1   conformer k31  weighted_average   1.0   0.0         no
+#     A1   conformer k31  weighted_average   1.0   0.0         YES
 #     A2   self_attention weighted_average   0.0   0.1         YES
 #     A3   self_attention mlp                0.0   0.1         YES
 #     A4   conformer k31  mlp                0.0   0.1         YES  <- proposed
 #
 #     matched-recipe ablations (architecture-level attribution):
-#       frame encoder        A3 -> A4
-#       latents2attractors   A2 -> A3
+#       frame encoder        A3 -> A4   (attractor branch fixed = ours)
+#       latents2attractors   A2 -> A3   (map alone)
+#       attractor branch     A1 -> A4   (encoder fixed = conformer; the map
+#                                        and the objective move together, so
+#                                        this is the branch as a PACKAGE)
 #       resolution matching  A4, per corpus (below)
 #     system-level comparison:
-#       A4 vs the published numbers, and vs paperlr (our faithful
+#       A1 and A4 vs the published numbers, and vs paperlr (our faithful
 #       reproduction of the published recipe)
+#
+#     A1 -> A4 and A2 -> A3 together decompose the attractor branch: the
+#     package effect on a fixed encoder, and the map component on its own.
 #
 #
 # THE BASELINE IS THE PUBLISHED METHOD, AS PUBLISHED
@@ -113,14 +119,16 @@
 # exactly the bookkeeping error that left a 2x-wrong chunk count sitting in
 # every config header in this repo for weeks. Not reintroducing it.
 #
-#   A (gpu0)  A4: pretrain -> adapt -> MSDWild -> MSDWild@sub5
-#   B (gpu1)  A2: pretrain -> adapt -> MSDWild      (+ A0 MSDWild if queued)
-#   C (gpu2)  A3: pretrain -> adapt -> MSDWild      (+ A1 chain if queued)
-#   D (gpu3)  waits for A4's adapt, then A4 RAMC@sub10 -> A4 RAMC@sub5
+#   A (gpu0)  A4: pretrain -> adapt -> MSDWild -> MSDWild@sub5     ~89 h
+#   B (gpu1)  A2: pretrain -> adapt -> MSDWild, then A4 RAMC@sub5  ~96 h
+#   C (gpu2)  A3: pretrain -> adapt -> MSDWild, then A4 RAMC@sub10 ~76 h
+#   D (gpu3)  A1: pretrain -> adapt -> MSDWild                     ~63 h
 #
-# Lane D deliberately blocks on A4_adapt rather than sitting idle: moving
-# A4's two RAMC finetunes off lane A cuts the critical path from ~135 h to
-# ~96 h. If A4 is not queued, lane D has nothing to do.
+# A4's two RAMC finetunes ride on lanes B and C rather than queueing behind
+# A4's own MSDWild work: that keeps the critical path at ~96 h instead of
+# ~135 h. A4's adapt finishes near 50 h while B and C need ~63 h for their
+# own arms, so their wait_for_stage A4_adapt calls are correctness guards
+# rather than real stalls.
 #
 #
 # ENV KNOBS
@@ -146,7 +154,7 @@ LANE_D_GPU="${LANE_D_GPU:-3}"
 ONLY_LANE="${ONLY_LANE:-}"
 # Which arms to run. A0 and A1 are DEFINED (configs exist) but NOT queued by
 # default -- see "THE BASELINE IS THE PUBLISHED METHOD" above.
-STORY_ARMS="${STORY_ARMS:-A2 A3 A4}"
+STORY_ARMS="${STORY_ARMS:-A1 A2 A3 A4}"
 DRY_RUN="${DRY_RUN:-0}"
 PROBE_SECONDS="${PROBE_SECONDS:-240}"
 LOG_DIR="${LOG_DIR:-logs/story_queue}"
@@ -525,7 +533,12 @@ run_ramc_sub5 () {        # H4 MATCHED arm
         "$d/infer_ramc_sub5trained.yaml" ramc
 }
 
-# Lane A: the proposed system, MSDWild side. Its RAMC side is on lane D.
+# One arm per lane, and A4's two RAMC finetunes tacked onto lanes B and C
+# once their own arm is done. A4's adapt lands around 50 h while B and C need
+# ~63 h for their own arms, so the wait_for_stage calls below never actually
+# stall -- they are correctness guards, not scheduling.
+#
+# Lane A: the proposed system, MSDWild side (its RAMC side is on B and C).
 lane_A () {
     arm_queued A4 || { log "lane A: A4 not in STORY_ARMS -- nothing to do"; return 0; }
     run_sc A4 "$LANE_A_GPU" || return 1
@@ -533,32 +546,36 @@ lane_A () {
     run_msdwild_sub5 A4 "$LANE_A_GPU"
 }
 
-# Lane B: A2 (H2's baseline). A0's finetune goes first when queued -- it has
-# no SC dependency (it inherits paperlr's adapt) so it lands on day one.
+# Lane B: A2, then A4's RAMC matched arm (the expensive one, 33 h).
 lane_B () {
     if arm_queued A0; then run_msdwild A0 "$LANE_B_GPU"; fi
-    arm_queued A2 || return 0
-    run_sc A2 "$LANE_B_GPU" || return 1
-    run_msdwild A2 "$LANE_B_GPU"
-}
-
-# Lane C: A3 (the pivot -- H2's other side and H1's baseline).
-lane_C () {
-    arm_queued A3 || { log "lane C: A3 not in STORY_ARMS -- nothing to do"; return 0; }
-    run_sc A3 "$LANE_C_GPU" || return 1
-    run_msdwild A3 "$LANE_C_GPU" || return 1
-    if arm_queued A1; then
-        run_sc A1 "$LANE_C_GPU" && run_msdwild A1 "$LANE_C_GPU"
+    if arm_queued A2; then
+        run_sc A2 "$LANE_B_GPU" || return 1
+        run_msdwild A2 "$LANE_B_GPU" || return 1
     fi
+    arm_queued A4 || return 0
+    wait_for_stage A4_adapt || return 1
+    run_ramc_sub5 A4 "$LANE_B_GPU"
 }
 
-# Lane D: A4's RAMC arms (H4), blocked on lane A producing A4's adapt.
-lane_D () {
-    arm_queued A4 || { log "lane D: A4 not in STORY_ARMS -- nothing to do"; return 0; }
-    log "lane D: waiting for A4_adapt from lane A before starting RAMC"
+# Lane C: A3, then A4's RAMC mismatched arm (the cheap one, 13 h).
+lane_C () {
+    if arm_queued A3; then
+        run_sc A3 "$LANE_C_GPU" || return 1
+        run_msdwild A3 "$LANE_C_GPU" || return 1
+    fi
+    arm_queued A4 || return 0
     wait_for_stage A4_adapt || return 1
-    run_ramc_sub10 A4 "$LANE_D_GPU" || return 1
-    run_ramc_sub5 A4 "$LANE_D_GPU"
+    run_ramc_sub10 A4 "$LANE_C_GPU"
+}
+
+# Lane D: A1 -- the conformer encoder on the PAPER's attractor branch. Pairs
+# with A4 (same encoder, our branch) for the attractor-branch package test,
+# and stands on its own as a system-level row.
+lane_D () {
+    arm_queued A1 || { log "lane D: A1 not in STORY_ARMS -- nothing to do"; return 0; }
+    run_sc A1 "$LANE_D_GPU" || return 1
+    run_msdwild A1 "$LANE_D_GPU"
 }
 
 # ===========================================================================
@@ -597,10 +614,11 @@ preflight () {
             log "  ok A0 inherits $n paperlr adapt checkpoint(s)"
         fi
     else
-        log "  note A0/A1 not queued by design -- the baseline is the"
-        log "       published method as published (paperlr: MSDWild 18.31,"
-        log "       RAMC 20.80). Architecture attribution comes from the"
-        log "       matched-recipe ablations A2->A3 and A3->A4."
+        log "  note A0 not queued by design -- the baseline is the published"
+        log "       method as published (paperlr: MSDWild 18.31, RAMC 20.80)."
+        log "       Architecture attribution comes from the matched-recipe"
+        log "       ablations A2->A3 (map), A3->A4 (encoder) and A1->A4"
+        log "       (attractor branch as a package, encoder fixed)."
     fi
 
     # Every precomputed cache and reference RTTM any queued arm reads. Uses
@@ -702,9 +720,9 @@ fi
 
 log "STARTING story queue -- arms: $STORY_ARMS"
 log "  lane A gpu $LANE_A_GPU: A4 pretrain->adapt->MSDWild->MSDWild@sub5"
-log "  lane B gpu $LANE_B_GPU: A2 pretrain->adapt->MSDWild (A0 MSDWild first if queued)"
-log "  lane C gpu $LANE_C_GPU: A3 pretrain->adapt->MSDWild (A1 after, if queued)"
-log "  lane D gpu $LANE_D_GPU: waits for A4_adapt, then A4 RAMC@sub10->RAMC@sub5"
+log "  lane B gpu $LANE_B_GPU: A2 pretrain->adapt->MSDWild, then A4 RAMC@sub5"
+log "  lane C gpu $LANE_C_GPU: A3 pretrain->adapt->MSDWild, then A4 RAMC@sub10"
+log "  lane D gpu $LANE_D_GPU: A1 pretrain->adapt->MSDWild"
 
 pids=()
 for lane in A B C D; do
