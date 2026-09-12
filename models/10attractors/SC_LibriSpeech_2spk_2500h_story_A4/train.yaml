@@ -27,7 +27,7 @@ context_size: 7
 conv_norm_type: batchnorm
 d_latents: 128
 detach_attractor_loss: False
-dev_batchsize: 96
+dev_batchsize: 80
 dropout_attractors: 0.1
 dropout_frames: 0.1
 feature_dim: 40
@@ -55,7 +55,7 @@ n_sa_heads_attractors: 4
 n_selfattends_attractors: 2
 n_xa_heads_attractors: 4
 noam_model_size: 512
-noam_warmup_steps: 50000
+noam_warmup_steps: 66642
 norm_loss_per_spk: True
 num_frames: 600
 num_speakers: 2
@@ -69,7 +69,7 @@ seed: 3
 specaugment: False
 subsampling: 10
 time_shuffle: False
-train_batchsize: 128
+train_batchsize: 96
 train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_fixed_2spks/train
 use_frame_selfattention: True
 use_last_samples: True

@@ -90,27 +90,25 @@ which is the authors' work and not ours.
 So A0 is not queued, and paperlr's existing numbers serve as the published
 baseline row directly.
 
-Every fresh arm still uses paperlr's EXACT pretrain and adapt schedule --
-the proven 512/50000 at batch 128 (pretrain) and 2111/48500 at batch 22
-(adapt), not re-derived values -- so the SC stages stay comparable across
-the whole family, including against paperlr itself.
+Every fresh arm shares one SC schedule, taken from the
+fixednoam_conformer_k31 lineage because that is the one validated at the
+batch sizes these arms actually fit in 32 GB -- see "BATCH SIZES AND THE
+NOAM VALUES THAT ARE TIED TO THEM" below for the values and their
+derivation. Both preserve the paper's peak LR (sqrt-scaled at pretrain, raw
+at adapt) and the adapt warmup reproduces paperlr's realised 27.3% ramp.
 
-Known wart, to report rather than fix here: that 50,000-step warmup was
-derived assuming 119,160 pretrain chunks, from a *measured* 993 steps/epoch
-at batch 120 -- the same measurement style that was exactly 2x wrong for
-the adapt cache (asserted 19,888, actual 39,064, because each rank of a
-2-rank DDP run sees half the epoch). The physical count is 150,000 (a
-pretrain chunk is num_frames 600 x subsampling 10 = 6000 raw frames, and
-frame_shift 160 at 16 kHz is 10 ms per raw frame, so exactly 60 s; 2500 h
-is 150,000 minutes). If so the realised ramp is 42.7%, not the 53.7% the
-paperlr config header claims. The queue's preflight counts the real cache
-and logs the true ramp so the write-up can state it correctly -- but it
-does NOT change the schedule, because uniformity across arms matters more
-here than the schedule's absolute optimality, and paperlr's schedule is
-the one with proven results behind it.
-
-Adapt keeps 2111/48500 at batch 22 (peak 9.882e-5, realised ramp 27.3%) for
-the same reason.
+Known wart, to report rather than fix: the pretrain warmup fraction depends
+on a chunk count nobody has verified. Configs in this repo assert 119,160,
+derived from a *measured* 993 steps/epoch at batch 120 -- the same
+measurement style that was exactly 2x wrong for the adapt cache (asserted
+19,888, actual 39,064, because each rank of a 2-rank DDP run sees half the
+epoch). The physical count is 150,000 (a pretrain chunk is num_frames 600 x
+subsampling 10 = 6000 raw frames, and frame_shift 160 at 16 kHz is 10 ms per
+raw frame, so exactly 60 s; 2500 h is 150,000 minutes). The realised ramp is
+53.7% on the first figure and 42.7% on the second. DRY_RUN=1 reports the
+true steps/epoch and chunk count, so record it for the write-up; the
+schedule itself is deliberately left alone, since uniformity across arms
+matters more here than the schedule's absolute optimality.
 """
 
 import os
@@ -134,22 +132,64 @@ RAMC_DATA = f'{DATA}/ramc_precomputed_6000frames'
 MSDWILD_TEST = f'{DATA}/msdwild/kaldi/test'
 RAMC_TEST = f'{DATA}/ramc/kaldi/test'
 
-# Noam at pretrain: paperlr's PROVEN values at batch 128. Deliberately not
-# re-derived -- see "NOAM, AND WHY A0 IS OUT OF SCOPE" in the module
-# docstring. Every fresh arm uses the identical schedule so the SC stages
-# stay comparable across the family, including against paperlr itself.
+# ---------------------------------------------------------------------------
+# BATCH SIZES AND THE NOAM VALUES THAT ARE TIED TO THEM
+#
+# Measured on 32 GB V100s (dry run, 2026-09-13) at the first-draft batches:
+#
+#   stage                  batch  A1/A4 conformer   A2 self-attn   A3 +mlp
+#   pretrain   600f sub10    128  OOM               n/a            n/a
+#   adapt     2400f sub10     22  OOM               31.9 GB        OOM
+#   finetune   600f sub10     64  24.4-24.5 GB      20.2 GB        20.3 GB
+#   finetune  1200f sub5      32  21.7 GB           --             --
+#
+# So the SC stages were over-provisioned (they were copied from `paperlr`,
+# the LIGHTER self-attention + weighted_average architecture) and the
+# finetunes were under-used. Batches below are the user's call, targeting
+# >28 GB on the heaviest arm.
+#
+# The batch must be IDENTICAL across arms within a stage, or A2 -> A3 (map)
+# and A3 -> A4 (encoder) are confounded by batch and optimizer-step count.
+# The ceiling is therefore set by the heaviest arm (conformer + mlp) and the
+# lighter arms necessarily sit below it -- the cost of the control.
+#
+# Pretrain 96 and adapt 16 are exactly the batches the
+# SC_LibriSpeech_2spk_2500h_fixednoam_conformer_k31 lineage ran on 2xV100,
+# so its Noam values apply directly and are already validated:
+#
+#   pretrain  512 / 66642  -> peak 1/sqrt(512*66642)  = 1.712e-4,
+#                             which is the paper's validated 9.882e-5
+#                             sqrt-scaled for batch 96: 9.882e-5*sqrt(96/32)
+#   adapt    1534 / 66749  -> peak 1/sqrt(1534*66749) = 9.882e-5 exactly,
+#                             the paper's raw peak (deliberately NOT
+#                             sqrt-scaled at adapt, matching paperlr), and a
+#                             warmup of 66749/(39064/16*100) = 27.3% of the
+#                             run, which reproduces paperlr's REALISED ramp
+#
+# If you change either SC batch, recompute with
+# diaper/common_utils/noam_lr_calc.py -- model_size = 1/(peak_lr^2 * warmup),
+# and warmup is a fraction of steps/epoch * epochs. Do not move the batch
+# without moving these.
+# ---------------------------------------------------------------------------
 PRETRAIN_NOAM_MODEL_SIZE = 512
-PRETRAIN_NOAM_WARMUP_STEPS = 50000
-# Adapt: the proven paperlr values at batch 22 (peak 9.882e-5).
-ADAPT_NOAM_MODEL_SIZE = 2111
-ADAPT_NOAM_WARMUP_STEPS = 48500
+PRETRAIN_NOAM_WARMUP_STEPS = 66642
+ADAPT_NOAM_MODEL_SIZE = 1534
+ADAPT_NOAM_WARMUP_STEPS = 66749
 
-# Batch sizes. Every finetune doubles the historical value (the user's call,
-# to use the 32 GB V100s): sub10/600-frame arms 32 -> 64, and the
-# sub5/1200-frame arms 16 -> 32 so that tokens-per-batch stay matched
-# between the two resolutions, which is what makes H4 a clean comparison.
-FT_BATCH_SUB10 = 64
-FT_BATCH_SUB5 = 32
+PRETRAIN_BATCH = 96
+PRETRAIN_DEV_BATCH = 80
+ADAPT_BATCH = 16
+ADAPT_DEV_BATCH = 16
+
+# Finetunes use Adam at a constant LR, so raising these costs no schedule
+# work. NOTE the consequence for H4: one RAMC chunk is 6000 raw frames and
+# is one training item at EITHER resolution (600f x sub10 == 1200f x sub5),
+# so steps/epoch = chunks/batch and the sub5 arm now does 80/48 = 1.67x the
+# optimizer steps of the sub10 arm at the same 500-epoch cap. Scoring the
+# sub5 arm at epoch 300 as well as 500 gives a step-matched control
+# (300 * 1/48 == 500 * 1/80); see research_story.md.
+FT_BATCH_SUB10 = 80
+FT_BATCH_SUB5 = 48
 
 # The shared architecture + data + optimization settings. Identical in every
 # arm and every stage unless a stage or arm override below changes it.
@@ -326,8 +366,8 @@ def pretrain_cfg(arm):
     pre, _, _ = _stage_paths(arm)
     cfg = dict(BASE, **ARMS[arm]['cfg'])
     cfg.update({
-        'dev_batchsize': 96,
-        'train_batchsize': 128,
+        'dev_batchsize': PRETRAIN_DEV_BATCH,
+        'train_batchsize': PRETRAIN_BATCH,
         'max_epochs': 100,
         'noam_model_size': PRETRAIN_NOAM_MODEL_SIZE,
         'noam_warmup_steps': PRETRAIN_NOAM_WARMUP_STEPS,
@@ -347,8 +387,8 @@ def adapt_cfg(arm):
     pre, adapt, _ = _stage_paths(arm)
     cfg = dict(BASE, **ARMS[arm]['cfg'])
     cfg.update({
-        'dev_batchsize': 32,
-        'train_batchsize': 22,
+        'dev_batchsize': ADAPT_DEV_BATCH,
+        'train_batchsize': ADAPT_BATCH,
         'max_epochs': 100,
         'noam_model_size': ADAPT_NOAM_MODEL_SIZE,
         'noam_warmup_steps': ADAPT_NOAM_WARMUP_STEPS,
