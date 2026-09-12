@@ -202,40 +202,46 @@ ADAPT_DEV_BATCH = 16
 # optimizer steps of the sub10 arm at the same 500-epoch cap. Scoring the
 # sub5 arm at epoch 300 as well as 500 gives a step-matched control
 # (300 * 1/48 == 500 * 1/80); see research_story.md.
-FT_BATCH_SUB10 = 80
+FT_BATCH_SUB10 = 96
 FT_BATCH_SUB5 = 48
 
 # PER-ARM BATCH OVERRIDES (user's call, 2026-09-13, from a second dry run
-# that measured each arm at the values above rather than only the heaviest).
-# The self-attention arms have spare VRAM at the shared batch, so they are
-# raised to fill their cards.
+# that measured each arm rather than only the heaviest). The self-attention
+# arms have spare VRAM at the conformer's batch, so they are raised to fill
+# their cards.
 #
-#   arm  pretrain  adapt  ft sub10
-#   A1     96        16      96
-#   A2    144        22     144
-#   A3    144        22     144
-#   A4     96        16      80     <- the heaviest arm, sets the floor
+#   arm  encoder    pretrain  adapt  ft sub10
+#   A1   conformer     96       16      96
+#   A2   self-attn    144       22     144
+#   A3   self-attn    144       22     144
+#   A4   conformer     96       16      96
+#
+# So the two conformer arms share one batch triple and the two
+# self-attention arms share another.
 #
 # READ THIS BEFORE USING A COMPARISON:
 # batch determines steps/epoch (= chunks/batch), so at the shared 500-epoch
 # cap two arms on different batches do different amounts of optimisation.
-# Which comparisons survive:
 #
-#   A2 -> A3  (l2a map)            SAME batch at every stage  -> CLEAN
-#   A1 -> A4  (attractor branch)   pretrain/adapt same; ft 96 vs 80, so A4
-#                                  gets 1.2x A1's finetune steps -> MILD
-#   A3 -> A4  (frame encoder)      144/22/144 vs 96/16/80, so A4 gets ~1.8x
-#                                  A3's finetune steps -> CONFOUNDED
+#   A2 -> A3  (l2a map)          144/22/144 both  -> CLEAN
+#   A1 -> A4  (attractor branch)  96/16/96 both   -> CLEAN
+#   A3 -> A4  (frame encoder)    144/22/144 vs 96/16/96, so A4 does 1.5x
+#                                A3's finetune steps -> CONFOUNDED
 #
-# Step count has been the dominant confound in this project before (the old
+# The two architecture-internal comparisons are now exact; only the
+# cross-encoder one is not, and unavoidably so: the conformer cannot reach
+# the self-attention arms' batch (it OOM'd at pretrain 128 / adapt 22), so
+# matching them means pulling A2/A3 DOWN to 96/16/96 rather than raising A4.
+#
+# Step count has broken a comparison in this project before -- the old
 # architecture sweep ran 2.5-2.9x fewer steps than its baseline, which is
 # why none of its numbers can be used, and the sub5 result only survived
-# because steps were controlled to within 3%). So the encoder claim cannot
-# rest on A3 -> A4 while these batches differ. Either match A3 down to A4's
-# batch, or read the encoder effect off A1 -> A4's pretrain/adapt-matched
-# pair and treat the finetune leg as approximate.
+# because steps were held to within 3%. So the encoder claim cannot rest on
+# A3 -> A4 at these batches. Either match A2/A3 down to 96/16/96, or state
+# the step ratio alongside the result and lean on A1 -> A4 (which does hold
+# the encoder's own attractor branch fixed) for the architecture-internal
+# half of the story.
 PER_ARM_BATCH = {
-    'A1': {'ft_sub10': 96},
     'A2': {'pretrain': 144, 'adapt': 22, 'ft_sub10': 144},
     'A3': {'pretrain': 144, 'adapt': 22, 'ft_sub10': 144},
 }
