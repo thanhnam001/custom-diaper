@@ -173,7 +173,6 @@ def new_metrics() -> Dict[str, float]:
         'attractor_accuracy',
         'att_qty_loss',
         'spk_counting_loss',
-        'spk_counting_accuracy',
         'vad_loss',
         'osd_loss',
         'spkid_loss',
