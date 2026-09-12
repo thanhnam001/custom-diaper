@@ -141,6 +141,10 @@
 #                          stage that never reaches a step at all
 #   PROBE_REPORT_EVERY     train.py --log-report-batches-num during the
 #                          probe (default 2), i.e. step-counting resolution
+#   PROBE_BATCHES          sweep train_batchsize during a dry run, e.g.
+#                          "16,20,24" -- one reported row per batch. Sweep on
+#                          the heaviest arm (STORY_ARMS=A4) and apply the
+#                          answer to all arms; see the note at its assignment
 #   ONLY_LANE=A,C          restrict to these lanes
 #   STORY_ARMS             which arms to run (default "A2 A3 A4"). A0/A1 are
 #                          defined but out of scope -- see "THE BASELINE IS
@@ -165,6 +169,18 @@ DRY_RUN="${DRY_RUN:-0}"
 # gives a slow stage only a couple of steps while wasting time on a fast one.
 PROBE_STEPS="${PROBE_STEPS:-30}"
 PROBE_REPORT_EVERY="${PROBE_REPORT_EVERY:-2}"
+# Comma-separated batch sizes to sweep during a dry run, e.g. "16,20,24".
+# Empty = probe once at each config's own train_batchsize. Use this to find
+# the largest batch that fits instead of extrapolating from OOM/no-OOM: the
+# fixed-vs-per-item memory split is not what linear guessing predicts.
+#
+# Sweep on the HEAVIEST arm only (STORY_ARMS=A4) and apply the answer to
+# every arm. The batch has to be identical across arms within a stage or
+# A2->A3 (map) and A3->A4 (encoder) are confounded by batch and step count,
+# which defeats the point of the queue. The lighter self-attention arms
+# therefore sit below the ceiling by design; that is the cost of the control,
+# not wasted capacity.
+PROBE_BATCHES="${PROBE_BATCHES:-}"
 # Safety backstop only -- fires if a stage cannot reach PROBE_STEPS at all
 # (bad cache, OOM, a hung loader). PROBE_SECONDS is honoured as an alias.
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-${PROBE_SECONDS:-900}}"
@@ -430,12 +446,16 @@ score_stage () {
 # throughput are unaffected by which weights are loaded.
 # ---------------------------------------------------------------------------
 probe_stage () {
-    local key="$1" gpu="$2" cfg="$3"
+    local key="$1" gpu="$2" cfg="$3" batch_override="${4:-}"
     if [ ! -f "$cfg" ]; then
         printf '  %-34s CONFIG MISSING (%s)\n' "$key" "$cfg"; return 1
     fi
     local batch epochs warmup subs frames plog vram_file samples out
     batch="$(yaml_get train_batchsize "$cfg")"
+    if [ -n "$batch_override" ]; then
+        batch="$batch_override"
+        key="${key}_b${batch}"
+    fi
     epochs="$(yaml_get max_epochs "$cfg")"
     warmup="$(yaml_get noam_warmup_steps "$cfg")"
     subs="$(yaml_get subsampling "$cfg")"
@@ -470,6 +490,7 @@ probe_stage () {
     ( timeout --signal=KILL "$PROBE_TIMEOUT" \
           env CUDA_VISIBLE_DEVICES="$gpu" "${PY[@]}" diaper/train.py -c "$cfg" \
           --gpu 1 --output-path "$out" --init-model-path '' \
+          --train-batchsize "$batch" \
           --log-report-batches-num "$PROBE_REPORT_EVERY" --num-workers 2 \
           > "$plog" 2>&1; echo $? > "$rcfile" ) >>"$plog" 2>&1 &
     local runner=$!
@@ -783,29 +804,52 @@ if [ "$DRY_RUN" = "1" ]; then
     log "nothing real is trained."
     log "Stages run one at a time so the VRAM readings are not contaminated."
     echo
+    [ -n "$PROBE_BATCHES" ] && \
+        log "Sweeping train_batchsize over: $PROBE_BATCHES"
+    # probe_one <key> <cfg> -- one row per swept batch, or one row at the
+    # config's own batch when PROBE_BATCHES is empty.
+    probe_one () {
+        local pkey="$1" pcfg="$2" b
+        if [ -z "$PROBE_BATCHES" ]; then
+            probe_stage "$pkey" "$LANE_A_GPU" "$pcfg"
+            return $?
+        fi
+        local oldifs="$IFS"; IFS=','
+        for b in $PROBE_BATCHES; do
+            IFS="$oldifs"
+            probe_stage "$pkey" "$LANE_A_GPU" "$pcfg" "$b"
+            IFS=','
+        done
+        IFS="$oldifs"
+        return 0
+    }
+
     for arm in $STORY_ARMS; do
         d="$(arm_dir "$arm")"
         echo "ARM $arm"
         [ "$arm" != "A0" ] && {
-            probe_stage "${arm}_pretrain" "$LANE_A_GPU" "$d/train.yaml"
-            probe_stage "${arm}_adapt"    "$LANE_A_GPU" "$d/train_10spks.yaml"
+            probe_one "${arm}_pretrain" "$d/train.yaml"
+            probe_one "${arm}_adapt"    "$d/train_10spks.yaml"
         }
-        probe_stage "${arm}_ft_msdwild" "$LANE_A_GPU" \
-            "$d/finetune_msdwild_10spks.yaml"
+        probe_one "${arm}_ft_msdwild" "$d/finetune_msdwild_10spks.yaml"
         [ -f "$d/finetune_msdwild_10spks_sub5.yaml" ] && \
-            probe_stage "${arm}_ft_msdwild_sub5" "$LANE_A_GPU" \
+            probe_one "${arm}_ft_msdwild_sub5" \
                 "$d/finetune_msdwild_10spks_sub5.yaml"
         [ -f "$d/finetune_ramc_10spks.yaml" ] && \
-            probe_stage "${arm}_ft_ramc" "$LANE_A_GPU" \
-                "$d/finetune_ramc_10spks.yaml"
+            probe_one "${arm}_ft_ramc" "$d/finetune_ramc_10spks.yaml"
         [ -f "$d/finetune_ramc_10spks_sub5.yaml" ] && \
-            probe_stage "${arm}_ft_ramc_sub5" "$LANE_A_GPU" \
+            probe_one "${arm}_ft_ramc_sub5" \
                 "$d/finetune_ramc_10spks_sub5.yaml"
         echo
     done
-    log "DRY RUN COMPLETE. If any vram figure is close to the card's limit,"
-    log "lower that stage's train_batchsize in scripts/gen_story_queue_configs.py"
-    log "and regenerate -- do NOT edit the yaml by hand."
+    log "DRY RUN COMPLETE."
+    log "Pick, per stage, the largest swept batch whose vram leaves ~2-3 GB of"
+    log "headroom -- the probe never reaches the epoch-end dev pass, which"
+    log "adds memory on top of what is reported here."
+    log "Then set it in scripts/gen_story_queue_configs.py and regenerate;"
+    log "do NOT edit the yaml by hand. For the pretrain and adapt stages the"
+    log "Noam values must move WITH the batch (see that file's docstring) or"
+    log "the LR schedule silently changes."
     log "Throwaway outputs are under $DRY_DIR (safe to delete)."
     exit 0
 fi

@@ -110,6 +110,36 @@ else
     fail=$((fail+1))
 fi
 
+echo "TEST: a batch override is passed to train.py and labels its own row"
+# Echo the batch train.py was actually handed, so the override is verified at
+# the argv level rather than just in the printed row.
+mk_stub <<'STUB'
+b="?"
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--train-batchsize" ]; then b="$2"; fi
+    shift
+done
+for i in $(seq 1 40); do
+    echo "[epoch 1] batch $i/1172 train: got_batchsize=$b"
+    sleep 0.2
+done
+STUB
+out="$(PROBE_STEPS=4 PROBE_TIMEOUT=60 probe_stage probe_sw 0 "$T/p.yaml" 48 2>&1)"
+rc=$?
+echo "$out"
+argv_batch="$(grep -o 'got_batchsize=[0-9]*' "$LOG_DIR/dryrun_probe_sw_b48.log" \
+              2>/dev/null | head -1)"
+if [ $rc -eq 0 ] \
+   && printf '%s' "$out" | grep -q "probe_sw_b48" \
+   && printf '%s' "$out" | grep -q "batch=48" \
+   && [ "$argv_batch" = "got_batchsize=48" ]; then
+    echo "  ok   override reached train.py's argv and keyed its own log/row"
+    pass=$((pass+1))
+else
+    echo "  FAIL override not applied (rc=$rc, argv saw '${argv_batch:-nothing}')"
+    fail=$((fail+1))
+fi
+
 echo "TEST: probe with a missing config reports cleanly and returns non-zero"
 out="$(probe_stage probe_missing 0 "$T/absent.yaml" 2>&1)"; rc=$?
 echo "$out"
