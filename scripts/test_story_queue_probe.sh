@@ -19,13 +19,29 @@ export LOG_DIR="$T/logs"
 export USE_CONDA_RUN=0
 mkdir -p "$LOG_DIR/dryrun" "$T/bin"
 
-# A python that does nothing and exits 0: no report line, no VRAM, so every
+# The stub python must fake ONLY the train.py invocation. probe_stage also
+# calls python for real work -- `python - <<script` to derive sec/step and
+# `python -c` for the hour/ramp arithmetic -- so the stub delegates those to
+# the real interpreter. Without this the stub answers the sec/step call with
+# its own fake training output, which looks like a hang.
+REAL_PY="$(command -v python || command -v python3)"
+export REAL_PY
+mk_stub () {  # mk_stub <<'BODY' ... BODY   -- body runs for train.py calls
+    {
+        echo '#!/bin/bash'
+        echo 'case "${1:-}" in'
+        echo '  -|-c) exec "$REAL_PY" "$@" ;;'
+        echo 'esac'
+        cat
+    } > "$T/bin/python"
+    chmod +x "$T/bin/python"
+}
+
+# A python that does nothing and exits 0: no report line, so every
 # downstream parse comes back empty. That is the worst case for the probe.
-cat > "$T/bin/python" <<'STUB'
-#!/bin/bash
+mk_stub <<'STUB'
 exit 0
 STUB
-chmod +x "$T/bin/python"
 export PATH="$T/bin:$PATH"
 
 # shellcheck source=/dev/null
@@ -41,16 +57,56 @@ subsampling: 10
 num_frames: 600
 YML
 
-PROBE_SECONDS=3
+PROBE_STEPS=4
+PROBE_TIMEOUT=6
 pass=0 fail=0
 
 echo "TEST: probe with a no-op python reports cleanly and returns non-zero"
 out="$(probe_stage probe_demo 0 "$T/p.yaml" 2>&1)"; rc=$?
 echo "$out"
-if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "NO REPORT LINE"; then
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "FAILED:"; then
     echo "  ok   degraded gracefully (rc=$rc)"; pass=$((pass+1))
 else
-    echo "  FAIL expected a NO REPORT LINE message and rc!=0 (got rc=$rc)"
+    echo "  FAIL expected a FAILED: message and rc!=0 (got rc=$rc)"
+    fail=$((fail+1))
+fi
+
+echo "TEST: an OOM in the log is named explicitly"
+mk_stub <<'STUB'
+echo "RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB"
+exit 1
+STUB
+out="$(probe_stage probe_oom 0 "$T/p.yaml" 2>&1)"; rc=$?
+echo "$out"
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "OUT OF MEMORY"; then
+    echo "  ok   OOM identified rather than reported as a generic failure"
+    pass=$((pass+1))
+else
+    echo "  FAIL expected OUT OF MEMORY in the line (got rc=$rc)"; fail=$((fail+1))
+fi
+
+echo "TEST: probe counts real steps, stops at PROBE_STEPS, derives the numbers"
+# Emits train.py's actual report format, one 'step' every 0.5 s, and would
+# run far past PROBE_STEPS if the probe did not stop it.
+mk_stub <<'STUB'
+for i in $(seq 1 400); do
+    echo "[epoch 1] batch $i/1172 train: loss=0.5 DER=20.00%"
+    sleep 0.5
+done
+STUB
+out="$(PROBE_STEPS=6 PROBE_TIMEOUT=120 probe_stage probe_ok 0 "$T/p.yaml" 2>&1)"
+rc=$?
+echo "$out"
+ok_line=1
+printf '%s' "$out" | grep -q "steps/ep=1172" || { echo "  (no steps/ep=1172)"; ok_line=0; }
+printf '%s' "$out" | grep -q "chunks=75008"  || { echo "  (no chunks=75008)"; ok_line=0; }
+printf '%s' "$out" | grep -qE "sec/step=0\.[0-9]" || { echo "  (no plausible sec/step)"; ok_line=0; }
+printf '%s' "$out" | grep -q "\[6 steps\]" || { echo "  (did not stop on the step limit)"; ok_line=0; }
+if [ $rc -eq 0 ] && [ "$ok_line" -eq 1 ]; then
+    echo "  ok   stopped on steps and reported steps/ep, chunks and sec/step"
+    pass=$((pass+1))
+else
+    echo "  FAIL step-bounded probe did not report as expected (rc=$rc)"
     fail=$((fail+1))
 fi
 

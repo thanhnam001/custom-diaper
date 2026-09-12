@@ -135,7 +135,12 @@
 # =========
 #   DRY_RUN=1              probe every stage (VRAM + steps/epoch + sec/step)
 #                          and exit without training anything
-#   PROBE_SECONDS          dry-run window per stage (default 240)
+#   PROBE_STEPS            optimizer steps per probed stage (default 30) --
+#                          this is what bounds the dry run
+#   PROBE_TIMEOUT          backstop seconds per stage (default 900) for a
+#                          stage that never reaches a step at all
+#   PROBE_REPORT_EVERY     train.py --log-report-batches-num during the
+#                          probe (default 2), i.e. step-counting resolution
 #   ONLY_LANE=A,C          restrict to these lanes
 #   STORY_ARMS             which arms to run (default "A2 A3 A4"). A0/A1 are
 #                          defined but out of scope -- see "THE BASELINE IS
@@ -156,7 +161,13 @@ ONLY_LANE="${ONLY_LANE:-}"
 # default -- see "THE BASELINE IS THE PUBLISHED METHOD" above.
 STORY_ARMS="${STORY_ARMS:-A1 A2 A3 A4}"
 DRY_RUN="${DRY_RUN:-0}"
-PROBE_SECONDS="${PROBE_SECONDS:-240}"
+# The dry run is bounded by STEPS, not wall clock: a fixed number of seconds
+# gives a slow stage only a couple of steps while wasting time on a fast one.
+PROBE_STEPS="${PROBE_STEPS:-30}"
+PROBE_REPORT_EVERY="${PROBE_REPORT_EVERY:-2}"
+# Safety backstop only -- fires if a stage cannot reach PROBE_STEPS at all
+# (bad cache, OOM, a hung loader). PROBE_SECONDS is honoured as an alias.
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-${PROBE_SECONDS:-900}}"
 LOG_DIR="${LOG_DIR:-logs/story_queue}"
 
 DIAPER_ENV="${DIAPER_ENV:-/data/ocr/namvt17/custom-diaper/.venv}"
@@ -398,15 +409,21 @@ score_stage () {
 # ---------------------------------------------------------------------------
 # probe_stage <key> <gpu> <cfg>   (DRY_RUN only)
 #
-# Runs the stage for PROBE_SECONDS into a THROWAWAY output_path and reports:
+# Runs the stage for PROBE_STEPS optimizer steps (not a fixed wall clock)
+# into a THROWAWAY output_path and reports:
 #   peak VRAM        -- does batch 64 actually fit in 32 GB?
 #   steps/epoch      -- read straight off train.py's "batch i/TOTAL" report,
 #                       which also finally settles the never-counted 2500h
 #                       pretrain cache: chunks = steps/epoch * batch
-#   sec/step         -- measured between report lines, so startup is excluded
+#   sec/step         -- measured across observed steps, startup excluded
 #   est. stage hours -- sec/step * steps/epoch * max_epochs
 #   realised ramp %  -- noam_warmup_steps / (steps/epoch * max_epochs), for
 #                       the SC stages, so the write-up can state it correctly
+#   why it stopped   -- "30 steps" normally, or TIMEOUT/exited early
+#
+# PROBE_TIMEOUT is only a backstop for a stage that never reaches a step.
+# An OOM is detected and named explicitly, since that is the whole point of
+# probing before committing ~324 GPU-h.
 #
 # --init-model-path '' is forced: a dry run has to work BEFORE anything has
 # trained, so warm-start weights generally do not exist yet. VRAM and
@@ -417,7 +434,7 @@ probe_stage () {
     if [ ! -f "$cfg" ]; then
         printf '  %-34s CONFIG MISSING (%s)\n' "$key" "$cfg"; return 1
     fi
-    local batch epochs warmup subs frames plog vram_file out
+    local batch epochs warmup subs frames plog vram_file samples out
     batch="$(yaml_get train_batchsize "$cfg")"
     epochs="$(yaml_get max_epochs "$cfg")"
     warmup="$(yaml_get noam_warmup_steps "$cfg")"
@@ -426,44 +443,117 @@ probe_stage () {
     out="$DRY_DIR/$key"
     plog="$LOG_DIR/dryrun_$key.log"
     vram_file="$DRY_DIR/$key.vram"
+    samples="$DRY_DIR/$key.samples"
     mkdir -p "$out"
-    : > "$plog"; : > "$vram_file"
+    : > "$plog"; : > "$vram_file"; : > "$samples"
 
-    ( while :; do
-          nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
-              -i "$gpu" >> "$vram_file" 2>/dev/null
-          sleep 2
-      done ) &
-    local sampler=$!
+    # train.py writes straight to $plog -- no awk timestamper, because the
+    # poll loop below already knows the clock, and avoiding the pipeline
+    # leaves a single child to tear down instead of three.
+    # The subshell writes an exit-code sentinel when the child is really
+    # done. `kill -0` is not usable for this: it SUCCEEDS on a zombie child,
+    # so a stage that dies at startup would otherwise sit out the whole
+    # backstop timeout instead of being reported immediately.
+    local rcfile="$DRY_DIR/$key.rc"
+    rm -f "$rcfile"
+    # Three things matter in this launch, all learned the hard way:
+    #  - the subshell's OWN fds go to $plog, never inherited. Otherwise, when
+    #    probe_stage is called inside a command substitution, the background
+    #    job holds that pipe open and the substitution blocks until the job
+    #    dies -- which looks exactly like a hang.
+    #  - `set -m` puts the job in its own process group, so the teardown can
+    #    kill env/conda/python together with one signal. Killing $! alone
+    #    only reaps the subshell and orphans the grandchild.
+    #  - `timeout` is a belt-and-braces backstop so the child cannot outlive
+    #    the probe even if the group kill fails.
+    set -m
+    ( timeout --signal=KILL "$PROBE_TIMEOUT" \
+          env CUDA_VISIBLE_DEVICES="$gpu" "${PY[@]}" diaper/train.py -c "$cfg" \
+          --gpu 1 --output-path "$out" --init-model-path '' \
+          --log-report-batches-num "$PROBE_REPORT_EVERY" --num-workers 2 \
+          > "$plog" 2>&1; echo $? > "$rcfile" ) >>"$plog" 2>&1 &
+    local runner=$!
+    set +m
 
-    timeout --signal=KILL "$PROBE_SECONDS" \
-        env CUDA_VISIBLE_DEVICES="$gpu" "${PY[@]}" diaper/train.py -c "$cfg" \
-            --gpu 1 --output-path "$out" --init-model-path '' \
-            --log-report-batches-num 5 --num-workers 2 2>&1 \
-        | awk '{ print systime(), $0; fflush() }' > "$plog"
-    kill "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null
+    # Poll: sample VRAM, and record (wall clock, batch index) pairs so
+    # sec/step is measured over real steps with process startup excluded.
+    # STEPS, not seconds, is the control: a fixed wall clock gives a slow
+    # stage (adapt, 2400 frames) only a couple of steps while wasting time
+    # on a fast one, and peak VRAM settles within a few steps anyway.
+    # waited is real elapsed time, not accumulated sleeps -- each iteration
+    # also pays for an nvidia-smi call, so counting sleeps alone understates
+    # the wall clock and makes the backstop fire far later than configured.
+    local t0 waited=0 last_batch=0 stop_reason=""
+    t0=$(date +%s)
+    while : ; do
+        if [ -f "$rcfile" ]; then
+            stop_reason="exited on its own (rc=$(cat "$rcfile" 2>/dev/null))"
+            break
+        fi
+        nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
+            -i "$gpu" >> "$vram_file" 2>/dev/null
+        last_batch=$(grep -oE 'batch [0-9]+/' "$plog" 2>/dev/null \
+                     | tail -1 | grep -oE '^[0-9]+|[0-9]+' | tail -1 || true)
+        last_batch="${last_batch:-0}"
+        if [ "$last_batch" -gt 0 ]; then
+            echo "$(date +%s) $last_batch" >> "$samples"
+        fi
+        if [ "$last_batch" -ge "$PROBE_STEPS" ]; then
+            stop_reason="$PROBE_STEPS steps"
+            break
+        fi
+        if [ "$waited" -ge "$PROBE_TIMEOUT" ]; then
+            stop_reason="TIMEOUT ${PROBE_TIMEOUT}s at step $last_batch"
+            break
+        fi
+        sleep 2
+        waited=$(( $(date +%s) - t0 ))
+    done
+
+    # Tear down. conda run spawns python as a grandchild, so killing the
+    # runner alone can orphan a process still holding the GPU -- which would
+    # corrupt the NEXT stage's VRAM reading. --output-path is unique per
+    # stage, so it is a precise matcher for the straggler.
+    #
+    # Kill the whole process group (negative PID), which `set -m` above made
+    # possible -- that gets env/conda/python in one shot without needing
+    # pkill, which is absent on some dev machines. pkill is a guarded
+    # fallback only, and can never be what hangs the probe.
+    kill -KILL -- "-$runner" 2>/dev/null || kill -KILL "$runner" 2>/dev/null
+    wait "$runner" 2>/dev/null
+    if command -v pkill >/dev/null 2>&1; then
+        timeout 10 pkill -KILL -f -- "--output-path $out" 2>/dev/null
+    fi
+    # Let the driver release the GPU before the next stage samples VRAM.
+    sleep 3
 
     local peak steps_per_epoch secs_per_step
-    peak=$(sort -n "$vram_file" | tail -1)
-    steps_per_epoch=$(grep -oE 'batch [0-9]+/[0-9]+' "$plog" | head -1 \
-                      | sed -E 's|.*/||')
-    secs_per_step=$("${PY[@]}" - "$plog" <<'PYEOF' 2>/dev/null
-import re, sys
-first = last = None
+    peak=$(sort -n "$vram_file" 2>/dev/null | tail -1)
+    steps_per_epoch=$(grep -oE 'batch [0-9]+/[0-9]+' "$plog" 2>/dev/null \
+                      | head -1 | sed -E 's|.*/||')
+    secs_per_step=$("${PY[@]}" - "$samples" <<'PYEOF' 2>/dev/null
+import sys
+pts = []
 for line in open(sys.argv[1], encoding='utf-8', errors='replace'):
-    m = re.match(r'(\d+) .*batch (\d+)/', line)
-    if m:
-        t, b = int(m.group(1)), int(m.group(2))
-        if first is None:
-            first = (t, b)
-        last = (t, b)
-if first and last and last[1] > first[1]:
-    print(f'{(last[0]-first[0])/(last[1]-first[1]):.3f}')
+    parts = line.split()
+    if len(parts) == 2:
+        try:
+            pts.append((int(parts[0]), int(parts[1])))
+        except ValueError:
+            pass
+# Only samples where a step had already been reported, so the process
+# startup cost (imports, model build, loader spin-up) is excluded.
+pts = [p for p in pts if p[1] > 0]
+if len(pts) >= 2 and pts[-1][1] > pts[0][1]:
+    print(f'{(pts[-1][0] - pts[0][0]) / (pts[-1][1] - pts[0][1]):.3f}')
 PYEOF
 )
     if [ -z "${steps_per_epoch:-}" ]; then
-        printf '  %-34s NO REPORT LINE in %ss -- see %s\n' \
-            "$key" "$PROBE_SECONDS" "$plog"
+        local why="no training step in ${waited}s"
+        if grep -qiE 'out of memory|CUDA error' "$plog" 2>/dev/null; then
+            why="OUT OF MEMORY -- lower this stage's train_batchsize"
+        fi
+        printf '  %-34s FAILED: %s (see %s)\n' "$key" "$why" "$plog"
         return 1
     fi
     local total_steps est_h ramp chunks
@@ -480,9 +570,10 @@ PYEOF
     else
         ramp='n/a'
     fi
-    printf '  %-34s vram=%6s MiB  batch=%-3s frames=%-5s sub=%-2s steps/ep=%-6s chunks=%-7s sec/step=%-6s est=%6sh  ramp=%s\n' \
+    printf '  %-34s vram=%6s MiB  batch=%-3s frames=%-5s sub=%-2s steps/ep=%-6s chunks=%-7s sec/step=%-6s est=%6sh  ramp=%-6s [%s]\n' \
         "$key" "${peak:-?}" "$batch" "$frames" "$subs" \
-        "$steps_per_epoch" "$chunks" "${secs_per_step:-?}" "$est_h" "$ramp"
+        "$steps_per_epoch" "$chunks" "${secs_per_step:-?}" "$est_h" "$ramp" \
+        "$stop_reason"
     return 0
 }
 
@@ -688,7 +779,8 @@ preflight || exit 1
 
 if [ "$DRY_RUN" = "1" ]; then
     mkdir -p "$DRY_DIR"
-    log "DRY RUN -- ${PROBE_SECONDS}s per stage, nothing real is trained."
+    log "DRY RUN -- $PROBE_STEPS steps per stage (${PROBE_TIMEOUT}s backstop),"
+    log "nothing real is trained."
     log "Stages run one at a time so the VRAM readings are not contaminated."
     echo
     for arm in $STORY_ARMS; do
