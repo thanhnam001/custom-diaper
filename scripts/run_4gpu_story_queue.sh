@@ -140,7 +140,11 @@
 #   PROBE_TIMEOUT          backstop seconds per stage (default 900) for a
 #                          stage that never reaches a step at all
 #   PROBE_REPORT_EVERY     train.py --log-report-batches-num during the
-#                          probe (default 2), i.e. step-counting resolution
+#                          probe (default 1), i.e. step-counting resolution
+#   PROBE_POLL             seconds between log checks (default 0.2). This
+#                          bounds how far past PROBE_STEPS a stage overshoots
+#   PROBE_VRAM_EVERY       sample nvidia-smi once per N log polls (default
+#                          10); nvidia-smi is ~100 ms+, the log check is not
 #   PROBE_BATCHES          sweep train_batchsize during a dry run, e.g.
 #                          "16,20,24" -- one reported row per batch. Sweep on
 #                          the heaviest arm (STORY_ARMS=A4) and apply the
@@ -168,7 +172,15 @@ DRY_RUN="${DRY_RUN:-0}"
 # The dry run is bounded by STEPS, not wall clock: a fixed number of seconds
 # gives a slow stage only a couple of steps while wasting time on a fast one.
 PROBE_STEPS="${PROBE_STEPS:-30}"
-PROBE_REPORT_EVERY="${PROBE_REPORT_EVERY:-2}"
+# Report every batch so the poll loop can see the exact step it must stop on.
+PROBE_REPORT_EVERY="${PROBE_REPORT_EVERY:-1}"
+# How often to re-read the training log, in seconds. This bounds how far past
+# PROBE_STEPS a stage can overshoot, so keep it small -- it is only a grep on
+# a small file. VRAM is sampled once every PROBE_VRAM_EVERY polls instead,
+# because nvidia-smi costs ~100 ms+ and pairing the two made the loop blind
+# to progress for ~2 s at a time (long enough for tens of steps to pass).
+PROBE_POLL="${PROBE_POLL:-0.2}"
+PROBE_VRAM_EVERY="${PROBE_VRAM_EVERY:-10}"
 # Comma-separated batch sizes to sweep during a dry run, e.g. "16,20,24".
 # Empty = probe once at each config's own train_batchsize. Use this to find
 # the largest batch that fits instead of extrapolating from OOM/no-OOM: the
@@ -431,6 +443,9 @@ score_stage () {
 #   steps/epoch      -- read straight off train.py's "batch i/TOTAL" report,
 #                       which also finally settles the never-counted 2500h
 #                       pretrain cache: chunks = steps/epoch * batch
+#   startup          -- launch -> first observed step. This, not the steps,
+#                       is what dominates a probed stage's wall clock (torch
+#                       import, opening the precomputed cache, model build)
 #   sec/step         -- measured across observed steps, startup excluded
 #   est. stage hours -- sec/step * steps/epoch * max_epochs
 #   realised ramp %  -- noam_warmup_steps / (steps/epoch * max_epochs), for
@@ -504,31 +519,42 @@ probe_stage () {
     # waited is real elapsed time, not accumulated sleeps -- each iteration
     # also pays for an nvidia-smi call, so counting sleeps alone understates
     # the wall clock and makes the backstop fire far later than configured.
-    local t0 waited=0 last_batch=0 stop_reason=""
+    # The log is polled ~10x more often than VRAM is sampled. Checking the
+    # log is a grep on a small file; nvidia-smi costs ~100 ms+, so pairing
+    # them meant the loop could only notice progress every ~2 s -- long
+    # enough for tens of steps to slip past PROBE_STEPS before it looked.
+    # startup (launch -> first observed step) is reported separately, since
+    # it, not the steps, is what dominates a stage's wall clock.
+    local t0 waited=0 last_batch=0 stop_reason="" startup="" vram_due=0
     t0=$(date +%s)
     while : ; do
         if [ -f "$rcfile" ]; then
             stop_reason="exited on its own (rc=$(cat "$rcfile" 2>/dev/null))"
             break
         fi
-        nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
-            -i "$gpu" >> "$vram_file" 2>/dev/null
+        if [ "$vram_due" -le 0 ]; then
+            nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
+                -i "$gpu" >> "$vram_file" 2>/dev/null
+            vram_due="$PROBE_VRAM_EVERY"
+        fi
+        vram_due=$(( vram_due - 1 ))
         last_batch=$(grep -oE 'batch [0-9]+/' "$plog" 2>/dev/null \
                      | tail -1 | grep -oE '^[0-9]+|[0-9]+' | tail -1 || true)
         last_batch="${last_batch:-0}"
         if [ "$last_batch" -gt 0 ]; then
             echo "$(date +%s) $last_batch" >> "$samples"
+            [ -z "$startup" ] && startup=$(( $(date +%s) - t0 ))
         fi
         if [ "$last_batch" -ge "$PROBE_STEPS" ]; then
-            stop_reason="$PROBE_STEPS steps"
+            stop_reason="$last_batch steps"
             break
         fi
+        waited=$(( $(date +%s) - t0 ))
         if [ "$waited" -ge "$PROBE_TIMEOUT" ]; then
             stop_reason="TIMEOUT ${PROBE_TIMEOUT}s at step $last_batch"
             break
         fi
-        sleep 2
-        waited=$(( $(date +%s) - t0 ))
+        sleep "$PROBE_POLL"
     done
 
     # Tear down. conda run spawns python as a grandchild, so killing the
@@ -591,10 +617,10 @@ PYEOF
     else
         ramp='n/a'
     fi
-    printf '  %-34s vram=%6s MiB  batch=%-3s frames=%-5s sub=%-2s steps/ep=%-6s chunks=%-7s sec/step=%-6s est=%6sh  ramp=%-6s [%s]\n' \
+    printf '  %-34s vram=%6s MiB  batch=%-3s frames=%-5s sub=%-2s steps/ep=%-6s chunks=%-7s startup=%-5s sec/step=%-6s est=%6sh  ramp=%-6s [%s]\n' \
         "$key" "${peak:-?}" "$batch" "$frames" "$subs" \
-        "$steps_per_epoch" "$chunks" "${secs_per_step:-?}" "$est_h" "$ramp" \
-        "$stop_reason"
+        "$steps_per_epoch" "$chunks" "${startup:-?}s" \
+        "${secs_per_step:-?}" "$est_h" "$ramp" "$stop_reason"
     return 0
 }
 

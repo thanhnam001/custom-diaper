@@ -101,7 +101,15 @@ ok_line=1
 printf '%s' "$out" | grep -q "steps/ep=1172" || { echo "  (no steps/ep=1172)"; ok_line=0; }
 printf '%s' "$out" | grep -q "chunks=75008"  || { echo "  (no chunks=75008)"; ok_line=0; }
 printf '%s' "$out" | grep -qE "sec/step=0\.[0-9]" || { echo "  (no plausible sec/step)"; ok_line=0; }
-printf '%s' "$out" | grep -q "\[6 steps\]" || { echo "  (did not stop on the step limit)"; ok_line=0; }
+# Must stop AT the limit, not tens of steps past it: the stub emits a step
+# every 0.2 s, so a loop that only looks every 2 s would overshoot badly.
+stopped_at="$(printf '%s' "$out" | grep -oE '\[[0-9]+ steps\]' | grep -oE '[0-9]+')"
+if [ -n "$stopped_at" ] && [ "$stopped_at" -ge 6 ] && [ "$stopped_at" -le 9 ]; then
+    :
+else
+    echo "  (stopped at '${stopped_at:-?}' steps, wanted 6-9)"; ok_line=0
+fi
+printf '%s' "$out" | grep -qE "startup=[0-9]+s" || { echo "  (no startup figure)"; ok_line=0; }
 if [ $rc -eq 0 ] && [ "$ok_line" -eq 1 ]; then
     echo "  ok   stopped on steps and reported steps/ep, chunks and sec/step"
     pass=$((pass+1))
