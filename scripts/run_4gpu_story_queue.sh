@@ -32,33 +32,45 @@
 # scripts/gen_story_queue_configs.py, which is also where the design is
 # documented; read its docstring before changing anything here.
 #
-#     arm  encoder        l2a map            Le    diversity
-#     A0   self_attention weighted_average   1.0   0.0   <- paper's arch
-#     A1   conformer k31  weighted_average   1.0   0.0
-#     A2   self_attention weighted_average   0.0   0.1
-#     A3   self_attention mlp                0.0   0.1
-#     A4   conformer k31  mlp                0.0   0.1   <- proposed system
+#     arm  encoder        l2a map            Le    diversity   queued
+#     A0   self_attention weighted_average   1.0   0.0         no
+#     A1   conformer k31  weighted_average   1.0   0.0         no
+#     A2   self_attention weighted_average   0.0   0.1         YES
+#     A3   self_attention mlp                0.0   0.1         YES
+#     A4   conformer k31  mlp                0.0   0.1         YES  <- proposed
 #
-#     H1  frame encoder        A0 -> A1  and  A3 -> A4   (replicated)
-#     H3  attractor objective  A0 -> A2
-#     H2  latents2attractors   A2 -> A3
-#     H5  all three            A0 -> A4
-#     H4  resolution matching  per corpus, below
+#     H1  frame encoder        A3 -> A4                 runnable
+#     H2  latents2attractors   A2 -> A3                 runnable
+#     H4  resolution matching  A4, per corpus (below)   runnable
+#     H3  attractor objective  needs A0 (not queued)    NO CONTROL
+#     H5  all three            needs A0 (not queued)    NO CONTROL
 #
 #
-# A0 IS NOT RETRAINED
-# ===================
-# A0 *is* the already-trained `paperlr` lineage. It reuses paperlr's pretrain
-# and adapt checkpoints untouched and only re-runs its FINETUNES, because
-# those have to sit under the same protocol (lr 1e-5) as A1-A4 -- finetuning
-# A0 at the old 1e-6 while every other arm uses 1e-5 would confound each
-# architecture comparison with a -1.48 DER LR effect, which is larger than
-# the effects being measured. That saves ~50 GPU-h and means A0's anchor
-# numbers land in the first day instead of the third.
+# A0 IS NOT QUEUED (and neither is A1)
+# =====================================
+# User's decision, 2026-09-12: A0 is the paper's own architecture, this
+# project already reproduced it, and re-running it is not a contribution.
+# Its configs still exist so it can be re-enabled with one env var.
 #
-# Consequence: the fresh arms MUST use paperlr's exact SC schedule
-# (512/50000 at batch 128, 2111/48500 at batch 22), which is why the configs
-# do not re-derive Noam. See the generator's docstring.
+# What that costs, recorded so it is not rediscovered later:
+#   - H3 (Le -> diversity penalty) HAS NO CONTROL. Le is only computed for
+#     latents2attractors: weighted_average, so the only arm that can have Le
+#     ON is the paper's architecture. Nothing left to compare against.
+#   - H5 (all three vs the baseline, one recipe) likewise. The practical
+#     claim "matches/beats the published numbers" survives via the PUBLISHED
+#     15.47 / 21.1, just not as a controlled comparison.
+#   - A1 is orphaned -- its only single-variable partner was A0.
+#
+# H1 survives via A3 -> A4, H2 via A2 -> A3, H4 entirely on A4. To restore
+# the H3 control:
+#
+#     STORY_ARMS="A0 A2 A3 A4" ./scripts/run_4gpu_story_queue.sh
+#
+# which is ONE ~13 GPU-h MSDWild finetune, because A0 inherits paperlr's
+# already-trained pretrain and adapt stages. Its finetunes must run at
+# lr 1e-5 like every other arm; finetuning it at the old 1e-6 would confound
+# the comparison with a -1.48 DER learning-rate effect, larger than the
+# effects being measured.
 #
 #
 # H4 -- RESOLUTION MATCHING, AND WHY IT IS A MECHANISM NOT A KNOB
@@ -72,7 +84,8 @@
 #   MSDWild  infers at subsampling 10 -> train@5 is MISMATCHED (expect NO gain)
 #
 # The MSDWild null result is the point: it rules out "finer is just better".
-# Run on A0 (baseline arch) and A4 (proposed arch) for RAMC, A4 for MSDWild.
+# Both arms run on A4, which is a complete H4 test on one architecture: RAMC
+# train@10 (mismatched) vs train@5 (matched), plus the MSDWild train@5 null.
 #
 #
 # THE PROTOCOL (identical in every finetune)
@@ -92,16 +105,14 @@
 # exactly the bookkeeping error that left a 2x-wrong chunk count sitting in
 # every config header in this repo for weeks. Not reintroducing it.
 #
-#   A (gpu0)  A4 full chain                                 <- critical path
-#   B (gpu1)  A0 MSDWild finetune  -> A1 full chain
-#   C (gpu2)  A0 RAMC@sub5         -> A2 full chain
-#   D (gpu3)  A0 RAMC@sub10        -> A3 full chain
+#   A (gpu0)  A4: pretrain -> adapt -> MSDWild -> MSDWild@sub5
+#   B (gpu1)  A2: pretrain -> adapt -> MSDWild      (+ A0 MSDWild if queued)
+#   C (gpu2)  A3: pretrain -> adapt -> MSDWild      (+ A1 chain if queued)
+#   D (gpu3)  waits for A4's adapt, then A4 RAMC@sub10 -> A4 RAMC@sub5
 #
-# A0's finetunes go first in lanes B/C/D because they have no SC dependency
-# (paperlr's adapt already exists) and they are the anchor everything else is
-# measured against -- getting them early de-risks the whole queue.
-# Lanes C/D free up well before lane A finishes; that slack is where the
-# deferred E-Branchformer arm or the H2 pretrain-matched variant would go.
+# Lane D deliberately blocks on A4_adapt rather than sitting idle: moving
+# A4's two RAMC finetunes off lane A cuts the critical path from ~135 h to
+# ~96 h. If A4 is not queued, lane D has nothing to do.
 #
 #
 # ENV KNOBS
@@ -110,6 +121,10 @@
 #                          and exit without training anything
 #   PROBE_SECONDS          dry-run window per stage (default 240)
 #   ONLY_LANE=A,C          restrict to these lanes
+#   STORY_ARMS             which arms to run (default "A2 A3 A4"). Setting
+#                          STORY_ARMS="A0 A2 A3 A4" restores the H3/H5
+#                          control for ~13 GPU-h (A0 inherits paperlr's SC
+#                          stages, so only its finetune runs)
 #   LANE_{A,B,C,D}_GPU     physical GPU per lane (default 0,1,2,3)
 #   LOG_DIR                default logs/story_queue
 #   EXP_ROOT, DIAPER_ENV, DSCORE_SRC, DSCORE_ENV, USE_CONDA_RUN
@@ -122,6 +137,9 @@ LANE_B_GPU="${LANE_B_GPU:-1}"
 LANE_C_GPU="${LANE_C_GPU:-2}"
 LANE_D_GPU="${LANE_D_GPU:-3}"
 ONLY_LANE="${ONLY_LANE:-}"
+# Which arms to run. A0 and A1 are DEFINED (configs exist) but NOT queued by
+# default -- see the "A0 IS NOT QUEUED" block above.
+STORY_ARMS="${STORY_ARMS:-A2 A3 A4}"
 DRY_RUN="${DRY_RUN:-0}"
 PROBE_SECONDS="${PROBE_SECONDS:-240}"
 LOG_DIR="${LOG_DIR:-logs/story_queue}"
@@ -160,6 +178,25 @@ lane_enabled () {
     [ -z "$ONLY_LANE" ] && return 0
     case ",$ONLY_LANE," in *",$1,"*) return 0;; esac
     return 1
+}
+arm_queued () { case " $STORY_ARMS " in *" $1 "*) return 0;; esac; return 1; }
+
+# wait_for_stage <key> -- block until another lane marks <key> done. Lane D's
+# A4 RAMC finetunes need A4's adapt checkpoint, which lane A produces; waiting
+# here instead of chaining them onto lane A cuts the critical path from ~135 h
+# to ~96 h. Returns non-zero if STOP is requested.
+wait_for_stage () {
+    local key="$1" waited=0
+    while ! stage_done "$key"; do
+        if stop_requested; then
+            log "  STOP requested while waiting for $key"; return 1
+        fi
+        if [ $((waited % 1800)) -eq 0 ]; then
+            log "  waiting for $key (${waited}s elapsed)"
+        fi
+        sleep 60; waited=$((waited + 60))
+    done
+    return 0
 }
 
 # A background lane subshell ignores a bare SIGINT, so tear down the whole
@@ -481,16 +518,41 @@ run_ramc_sub5 () {        # H4 MATCHED arm
         "$d/infer_ramc_sub5trained.yaml" ramc
 }
 
-lane_A () { run_sc A4 "$LANE_A_GPU" && run_msdwild A4 "$LANE_A_GPU" \
-            && run_msdwild_sub5 A4 "$LANE_A_GPU" \
-            && run_ramc_sub10 A4 "$LANE_A_GPU" \
-            && run_ramc_sub5 A4 "$LANE_A_GPU"; }
-lane_B () { run_msdwild A0 "$LANE_B_GPU"; run_sc A1 "$LANE_B_GPU" \
-            && run_msdwild A1 "$LANE_B_GPU"; }
-lane_C () { run_ramc_sub5 A0 "$LANE_C_GPU"; run_sc A2 "$LANE_C_GPU" \
-            && run_msdwild A2 "$LANE_C_GPU"; }
-lane_D () { run_ramc_sub10 A0 "$LANE_D_GPU"; run_sc A3 "$LANE_D_GPU" \
-            && run_msdwild A3 "$LANE_D_GPU"; }
+# Lane A: the proposed system, MSDWild side. Its RAMC side is on lane D.
+lane_A () {
+    arm_queued A4 || { log "lane A: A4 not in STORY_ARMS -- nothing to do"; return 0; }
+    run_sc A4 "$LANE_A_GPU" || return 1
+    run_msdwild A4 "$LANE_A_GPU" || return 1
+    run_msdwild_sub5 A4 "$LANE_A_GPU"
+}
+
+# Lane B: A2 (H2's baseline). A0's finetune goes first when queued -- it has
+# no SC dependency (it inherits paperlr's adapt) so it lands on day one.
+lane_B () {
+    if arm_queued A0; then run_msdwild A0 "$LANE_B_GPU"; fi
+    arm_queued A2 || return 0
+    run_sc A2 "$LANE_B_GPU" || return 1
+    run_msdwild A2 "$LANE_B_GPU"
+}
+
+# Lane C: A3 (the pivot -- H2's other side and H1's baseline).
+lane_C () {
+    arm_queued A3 || { log "lane C: A3 not in STORY_ARMS -- nothing to do"; return 0; }
+    run_sc A3 "$LANE_C_GPU" || return 1
+    run_msdwild A3 "$LANE_C_GPU" || return 1
+    if arm_queued A1; then
+        run_sc A1 "$LANE_C_GPU" && run_msdwild A1 "$LANE_C_GPU"
+    fi
+}
+
+# Lane D: A4's RAMC arms (H4), blocked on lane A producing A4's adapt.
+lane_D () {
+    arm_queued A4 || { log "lane D: A4 not in STORY_ARMS -- nothing to do"; return 0; }
+    log "lane D: waiting for A4_adapt from lane A before starting RAMC"
+    wait_for_stage A4_adapt || return 1
+    run_ramc_sub10 A4 "$LANE_D_GPU" || return 1
+    run_ramc_sub5 A4 "$LANE_D_GPU"
+}
 
 # ===========================================================================
 # Preflight
@@ -499,7 +561,8 @@ preflight () {
     local fail=0 d
     log "PREFLIGHT"
 
-    for arm in A0 A1 A2 A3 A4; do
+    log "  arms queued: $STORY_ARMS"
+    for arm in $STORY_ARMS; do
         d="$(arm_dir "$arm")"
         if [ ! -d "$d" ]; then
             log "  FATAL $arm -- $d missing. Run:"
@@ -510,27 +573,38 @@ preflight () {
     done
     [ $fail -eq 1 ] && return 1
 
-    # A0's whole point is that paperlr's adapt checkpoints already exist.
-    local plr_adapt
-    plr_adapt="$(yaml_get init_model_path "$(arm_dir A0)/finetune_msdwild_10spks.yaml")"
-    local n
-    n=$(find "$plr_adapt" -maxdepth 1 -name 'checkpoint_*.tar' 2>/dev/null | wc -l)
-    if [ "$n" -eq 0 ]; then
-        log "  FATAL A0 -- paperlr adapt checkpoints missing at:"
-        log "        $plr_adapt"
-        log "        A0 inherits them; without them it would train from random"
-        log "        init and stop being a valid anchor. Upload them with"
-        log "        scripts/pack_weights_for_story_queue.sh."
-        fail=1
+    if arm_queued A0; then
+        # A0's whole point is that paperlr's adapt checkpoints already exist.
+        local plr_adapt n
+        plr_adapt="$(yaml_get init_model_path \
+                     "$(arm_dir A0)/finetune_msdwild_10spks.yaml")"
+        n=$(find "$plr_adapt" -maxdepth 1 -name 'checkpoint_*.tar' 2>/dev/null | wc -l)
+        if [ "$n" -eq 0 ]; then
+            log "  FATAL A0 -- paperlr adapt checkpoints missing at:"
+            log "        $plr_adapt"
+            log "        A0 inherits them; without them it would train from"
+            log "        random init. Upload them with"
+            log "        scripts/pack_weights_for_story_queue.sh."
+            fail=1
+        else
+            log "  ok A0 inherits $n paperlr adapt checkpoint(s)"
+        fi
     else
-        log "  ok A0 inherits $n paperlr adapt checkpoint(s)"
+        log "  note A0 NOT queued, so H3 (Le -> diversity) and H5 have no"
+        log "       control this round. H1 runs as A3->A4, H2 as A2->A3."
+        log "       STORY_ARMS=\"A0 $STORY_ARMS\" restores them for ~13 GPU-h."
     fi
 
-    # Every precomputed cache the queue reads.
-    local seen=""
-    for cfg in "$(arm_dir A4)"/train.yaml "$(arm_dir A4)"/train_10spks.yaml \
-               "$(arm_dir A4)"/finetune_msdwild_10spks.yaml \
-               "$(arm_dir A4)"/finetune_ramc_10spks.yaml; do
+    # Every precomputed cache and reference RTTM any queued arm reads. Uses
+    # whichever queued arm carries the most config types as the reference.
+    local ref_arm
+    if arm_queued A4; then ref_arm=A4; else ref_arm="${STORY_ARMS%% *}"; fi
+    local seen="" d_ref
+    d_ref="$(arm_dir "$ref_arm")"
+    for cfg in "$d_ref"/train.yaml "$d_ref"/train_10spks.yaml \
+               "$d_ref"/finetune_msdwild_10spks.yaml \
+               "$d_ref"/finetune_ramc_10spks.yaml; do
+        [ -f "$cfg" ] || continue
         for k in train_precomputed_dir valid_precomputed_dir; do
             local p; p="$(yaml_get "$k" "$cfg")"
             case " $seen " in *" $p "*) continue;; esac
@@ -542,7 +616,8 @@ preflight () {
             fi
         done
     done
-    for cfg in "$(arm_dir A4)"/infer_msdwild.yaml "$(arm_dir A4)"/infer_ramc.yaml; do
+    for cfg in "$d_ref"/infer_msdwild.yaml "$d_ref"/infer_ramc.yaml; do
+        [ -f "$cfg" ] || continue
         local p; p="$(yaml_get infer_data_dir "$cfg")"
         if [ -f "$p/rttm" ]; then log "  ok reference $p/rttm"
         else log "  FATAL reference rttm missing: $p/rttm"; fail=1; fi
@@ -590,7 +665,7 @@ if [ "$DRY_RUN" = "1" ]; then
     log "DRY RUN -- ${PROBE_SECONDS}s per stage, nothing real is trained."
     log "Stages run one at a time so the VRAM readings are not contaminated."
     echo
-    for arm in A0 A1 A2 A3 A4; do
+    for arm in $STORY_ARMS; do
         d="$(arm_dir "$arm")"
         echo "ARM $arm"
         [ "$arm" != "A0" ] && {
@@ -617,11 +692,11 @@ if [ "$DRY_RUN" = "1" ]; then
     exit 0
 fi
 
-log "STARTING story queue"
-log "  lane A gpu $LANE_A_GPU: A4 (pretrain->adapt->MSDWild->MSDWild@sub5->RAMC->RAMC@sub5)"
-log "  lane B gpu $LANE_B_GPU: A0 MSDWild, then A1"
-log "  lane C gpu $LANE_C_GPU: A0 RAMC@sub5, then A2"
-log "  lane D gpu $LANE_D_GPU: A0 RAMC@sub10, then A3"
+log "STARTING story queue -- arms: $STORY_ARMS"
+log "  lane A gpu $LANE_A_GPU: A4 pretrain->adapt->MSDWild->MSDWild@sub5"
+log "  lane B gpu $LANE_B_GPU: A2 pretrain->adapt->MSDWild (A0 MSDWild first if queued)"
+log "  lane C gpu $LANE_C_GPU: A3 pretrain->adapt->MSDWild (A1 after, if queued)"
+log "  lane D gpu $LANE_D_GPU: waits for A4_adapt, then A4 RAMC@sub10->RAMC@sub5"
 
 pids=()
 for lane in A B C D; do

@@ -252,12 +252,37 @@ ARMS = {
     },
 }
 
+# QUEUED vs DEFINED. All five arms are DEFINED (and their configs generated)
+# so that re-enabling one is a single env var on the queue, but the queue runs
+# only A2/A3/A4 by default -- see STORY_ARMS in run_4gpu_story_queue.sh.
+#
+# A0 and A1 are defined-but-not-queued at the user's decision (2026-09-12):
+# A0 is the paper's architecture, which this project already reproduced, and
+# re-running it is not a contribution. The cost of that decision, recorded
+# here so it is not rediscovered later:
+#
+#   - H3 (Le -> diversity penalty) LOSES ITS CONTROL. Le is only computed for
+#     latents2attractors: weighted_average, so the only arm that can have Le
+#     ON is the paper's architecture. With A0 out, there is nothing to compare
+#     the diversity objective against.
+#   - H5 (all three together, measured against the baseline) likewise. The
+#     practical claim "our system matches/beats the published numbers"
+#     survives via the PUBLISHED 15.47 / 21.1, but not as a controlled
+#     single-recipe comparison.
+#   - A1 is orphaned: its only single-variable partner was A0.
+#
+# H1 survives via A3 -> A4 and H2 via A2 -> A3, neither of which needs A0.
+# To re-add the H3 control later:
+#     STORY_ARMS="A0 A2 A3 A4" ./scripts/run_4gpu_story_queue.sh
+# which costs one ~13 GPU-h MSDWild finetune, because A0 inherits paperlr's
+# already-trained pretrain and adapt stages rather than retraining them.
+#
 # Which arms get which finetunes. MSDWild carries the H1/H2/H3 ablation
 # because it is the multi-speaker benchmark; RAMC is 2-speaker, so only the
 # baseline and the proposed system run there. The H4 resolution pair runs on
 # A0 and A4 for RAMC (where sub5 is the MATCHED arm) and on A4 for MSDWild
 # (where sub5 is the MISMATCHED arm and H4 predicts no gain).
-RAMC_ARMS = ('A0', 'A4')
+RAMC_ARMS = ('A0', 'A4')  # A0 only if re-enabled; see QUEUED_ARMS note
 MSDWILD_SUB5_ARMS = ('A4',)
 
 

@@ -12,11 +12,25 @@
 # configs expect it.
 #
 #
+# YOU PROBABLY DO NOT NEED TO RUN THIS
+# ====================================
+# The queue's DEFAULT arm set is "A2 A3 A4", and all three train every stage
+# from scratch -- they need no uploaded weights at all, only the precomputed
+# feature caches, which are already on the server. So for a default run this
+# packer is a no-op you can skip.
+#
+# It is needed ONLY when A0 is re-enabled:
+#
+#     STORY_ARMS="A0 A2 A3 A4" ./scripts/run_4gpu_story_queue.sh
+#
+# which restores the control for H3 (Le -> attractor diversity penalty) and
+# H5. Without A0 those two hypotheses have nothing to compare against, since
+# Le is only computed for latents2attractors: weighted_average and A0 is the
+# only arm with that map plus Le on.
+#
+#
 # WHY THERE IS ONLY ONE ITEM
 # ==========================
-# Arms A1-A4 train all three stages from scratch, so they need no uploaded
-# weights at all -- only the precomputed feature caches, which are already on
-# the server.
 #
 # A0 is the exception: it IS the already-trained `paperlr` lineage
 # (self-attention + weighted_average + entropy term Le, at 2500h on the

@@ -183,7 +183,7 @@ reported as setup, not as findings.
 A convolution-augmented encoder represents frames better.
 
 *Experiment:* self-attention → conformer k31, all else fixed
-(arms **A0 → A1**, replicated as **A3 → A4**).
+(arm **A3 → A4**).
 
 *Prior evidence:* MSDWild 18.31 → 17.06/17.15, and the pretrain table in §2a.
 **But confounded** — see §4.6.
@@ -200,7 +200,7 @@ constrained than a convex combination and loses, the hypothesis cannot be
 "less constraint is better" — it must be **"the right added capacity"**. That
 is a sharper and more falsifiable claim, and we owe it to the negative result.
 
-### H3. `Le` regularises the wrong object. `PENDING`
+### H3. `Le` regularises the wrong object. `NOT RUN — no control`
 
 The entropy term acts on combination weights; attractors need an **explicit
 diversity objective** or they collapse.
@@ -208,9 +208,17 @@ diversity objective** or they collapse.
 *Experiment:* `Le` → cosine-similarity diversity penalty on the attractors
 (arm **A0 → A2**).
 
-*Why this is the most important arm:* §2b says the entire residual deficit is
-confusion, and §2b says attractor collapse is real and recurring. This is the
-one in-repo lever aimed directly at that.
+**Status: no control available this round.** `Le` is only computed for
+`latents2attractors: weighted_average` — every other map returns a zero term
+— so the only arm that can have `Le` **on** is the paper's architecture (A0),
+and A0 is not queued (see §5). Without it there is nothing to compare the
+diversity objective against.
+
+This is worth stating plainly rather than quietly dropping, because §2b
+identifies confusion as the *entire* remaining deficit and attractor collapse
+as real and recurring, and this is the one in-repo lever aimed at it. The
+control costs one ~13 GPU-h MSDWild finetune (A0 inherits paperlr's SC
+stages): `STORY_ARMS="A0 A2 A3 A4"`.
 
 ### H4. The resolution effect is "matched", not "finer". `PROVEN`
 
@@ -246,12 +254,19 @@ and loses 11 % of it. The sub5-trained model emits **25,999 / 2.41 s /
 17.37 h**: it *reproduces the reference's segment statistics.* The entire DER
 gain is recovered missed speech (−7.9).
 
-### H5. The three changes are complementary. `PENDING`
+### H5. The three changes are complementary. `PARTIAL`
 
-*Experiment:* all three together (arm **A0 → A4**), and H1 measured twice —
-once at each end of the chain (A0→A1 and A3→A4) — which says whether the
+*Experiment:* all three together (arm **A0 → A4**).
+
+**As a controlled single-recipe comparison this needs A0, so it is not run
+this round** (same reason as H3). What survives is the practical claim: A4's
+absolute numbers against the **published** 15.47 / 21.1. That is a weaker form
+of the claim — it compares across recipes, not within one — and should be
+stated as such.
+
+The H1 replication (A0→A1 *and* A3→A4), which would have said whether the
 encoder gain is **additive** with the attractor-branch changes or **redundant**
-with them.
+with them, is also lost; H1 now runs once, as A3→A4.
 
 ### H6. Long-recording attractor instability. `DIAGNOSED, UNFIXED`
 
@@ -307,13 +322,13 @@ Five arms, each a full three-stage pipeline (pretrain → adapt → finetune)
 under one identical recipe, each differing from its comparison partner in
 exactly one factor.
 
-| arm | encoder | l2a map | `Le` | diversity | role |
-|---|---|---|---|---|---|
-| **A0** | self-attention | `weighted_average` | 1.0 | 0.0 | the published architecture; the anchor |
-| **A1** | conformer k31 | `weighted_average` | 1.0 | 0.0 | H1 |
-| **A2** | self-attention | `weighted_average` | 0.0 | 0.1 | H3 |
-| **A3** | self-attention | `mlp` | 0.0 | 0.1 | H2 |
-| **A4** | conformer k31 | `mlp` | 0.0 | 0.1 | H5 — the proposed system |
+| arm | encoder | l2a map | `Le` | diversity | queued | role |
+|---|---|---|---|---|---|---|
+| A0 | self-attention | `weighted_average` | 1.0 | 0.0 | **no** | the published architecture |
+| A1 | conformer k31 | `weighted_average` | 1.0 | 0.0 | **no** | orphaned without A0 |
+| **A2** | self-attention | `weighted_average` | 0.0 | 0.1 | yes | H2 baseline |
+| **A3** | self-attention | `mlp` | 0.0 | 0.1 | yes | the pivot |
+| **A4** | conformer k31 | `mlp` | 0.0 | 0.1 | yes | the proposed system |
 
 **The chain order is forced by a code constraint.** `Le` is only computed for
 `latents2attractors: weighted_average`; every other map returns a zero term
@@ -324,27 +339,35 @@ makes H2 single-variable.
 
 Single-variable comparisons, verified by pairwise config diff:
 
-| hypothesis | comparison | what differs |
-|---|---|---|
-| H1 | A0 → A1, **and** A3 → A4 | `frame_encoder_type` only |
-| H3 | A0 → A2 | the attractor objective only |
-| H2 | A2 → A3 | `latents2attractors` only |
-| H5 | A0 → A4 | all three |
+| hypothesis | comparison | what differs | status |
+|---|---|---|---|
+| H1 | A3 → A4 | `frame_encoder_type` only | runnable |
+| H2 | A2 → A3 | `latents2attractors` only | runnable |
+| H4 | A4, per corpus | training resolution only | runnable |
+| H3 | A0 → A2 | the attractor objective only | **no control** |
+| H5 | A0 → A4 | all three | **no control** |
 
-**A0 is not retrained.** A0 *is* the already-trained `paperlr` lineage, so it
-reuses those pretrain and adapt checkpoints untouched and only re-runs its
-**finetunes** — because those must sit under the same protocol (lr 1e-5) as
-A1–A4. Finetuning A0 at the old 1e-6 while every other arm uses 1e-5 would
-confound each architecture comparison with a −1.48 DER LR effect, larger than
-the effects being measured. This saves ~50 GPU-h and lands the anchor numbers
-in the first day rather than the third. The consequence is that the fresh arms
-must use paperlr's *exact* SC schedule, which is why the configs do not
-re-derive Noam.
+**A0 and A1 are defined but not queued.** A0 is the paper's own architecture,
+which this project has already reproduced, and re-running it is not a
+contribution. A1's only single-variable partner was A0, so it is orphaned.
+Their configs are generated and kept, so re-enabling is one env var.
 
-**Finetune coverage.** MSDWild for all five arms (it is the multi-speaker
-benchmark, so it carries the H1/H2/H3 ablation); RAMC for A0 and A4 only
-(RAMC is 2-speaker, so the middle arms buy little); the H4 resolution pair on
-A0 and A4 for RAMC and on A4 for MSDWild.
+The cost is H3 and H5 (above). It is recorded rather than glossed because H3
+targets the one error component still separating us from the reference, and
+because the control is cheap: A0 inherits paperlr's already-trained pretrain
+and adapt stages, so restoring it is a **single ~13 GPU-h MSDWild finetune**
+via `STORY_ARMS="A0 A2 A3 A4"`. Its finetunes would have to run at lr 1e-5
+like every other arm — at the old 1e-6 the comparison would be confounded by
+a −1.48 DER learning-rate effect, larger than the effects being measured.
+
+A knock-on constraint either way: because A0 *could* be re-enabled and would
+inherit paperlr's SC stages, the fresh arms use paperlr's **exact** pretrain
+and adapt schedule, which is why the configs do not re-derive Noam.
+
+**Finetune coverage.** MSDWild for all queued arms (it is the multi-speaker
+benchmark, so it carries the H1/H2 ablation); RAMC on A4 only, which is a
+complete H4 test on one architecture — train@10 (mismatched) vs train@5
+(matched) — plus the MSDWild train@5 null arm.
 
 **Deferred:** E-Branchformer (queue size), and the pretrain-matched version of
 H2 (the two maps differ in parameter shape, so a shared pretrain warm-starts
@@ -357,8 +380,10 @@ result. Running their weights through our loop as a *diagnostic reference*
 remains fine and has been useful.
 
 Run with `scripts/run_4gpu_story_queue.sh` (configs from
-`scripts/gen_story_queue_configs.py`). ≈ 383 GPU-h, ~5.6 days wall on
-4×V100, one arm per GPU.
+`scripts/gen_story_queue_configs.py`). **≈ 261 GPU-h, ~4 days wall** on
+4×V100: three arms of pretrain → adapt → MSDWild finetune, with GPU 3 picking
+up A4's two RAMC finetunes as soon as A4's adapt checkpoint exists, which
+keeps the critical path off a single lane.
 
 ---
 
