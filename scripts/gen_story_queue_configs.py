@@ -171,11 +171,25 @@ RAMC_TEST = f'{DATA}/ramc/kaldi/test'
 # and warmup is a fraction of steps/epoch * epochs. Do not move the batch
 # without moving these.
 # ---------------------------------------------------------------------------
-PRETRAIN_NOAM_MODEL_SIZE = 512
-PRETRAIN_NOAM_WARMUP_STEPS = 66642
-ADAPT_NOAM_MODEL_SIZE = 1534
-ADAPT_NOAM_WARMUP_STEPS = 66749
+# Noam per SC batch size. Every entry preserves the paper's peak LR and the
+# same fraction-of-run warmup, so switching batch does not change the shape
+# of the schedule -- only its step axis:
+#
+#   pretrain: peak is sqrt-scaled from the paper's validated 9.882e-5, and
+#   warmup scales inversely with batch. Those two cancel in
+#   model_size = 1/(peak^2 * warmup), which is why model_size stays 512 at
+#   every batch -- a useful self-check rather than a coincidence.
+#       96  -> peak 9.882e-5*sqrt(96/32)  = 1.712e-4, warmup 66642
+#       144 -> peak 9.882e-5*sqrt(144/32) = 2.096e-4, warmup 66642*96/144
+#   adapt: peak is left at the paper's RAW 9.882e-5 (not sqrt-scaled),
+#   matching paperlr's own choice at this stage.
+#       16 -> 1534/66749, warmup 27.3% of the run (39064 chunks / 16 * 100)
+#       22 -> 2111/48500, warmup 27.3% as well -- these are paperlr's own
+#             values, since paperlr ran adapt at batch 22
+PRETRAIN_NOAM = {96: (512, 66642), 144: (512, 44428)}
+ADAPT_NOAM = {16: (1534, 66749), 22: (2111, 48500)}
 
+# Per-stage defaults, overridden per arm below.
 PRETRAIN_BATCH = 96
 PRETRAIN_DEV_BATCH = 80
 ADAPT_BATCH = 16
@@ -190,6 +204,46 @@ ADAPT_DEV_BATCH = 16
 # (300 * 1/48 == 500 * 1/80); see research_story.md.
 FT_BATCH_SUB10 = 80
 FT_BATCH_SUB5 = 48
+
+# PER-ARM BATCH OVERRIDES (user's call, 2026-09-13, from a second dry run
+# that measured each arm at the values above rather than only the heaviest).
+# The self-attention arms have spare VRAM at the shared batch, so they are
+# raised to fill their cards.
+#
+#   arm  pretrain  adapt  ft sub10
+#   A1     96        16      96
+#   A2    144        22     144
+#   A3    144        22     144
+#   A4     96        16      80     <- the heaviest arm, sets the floor
+#
+# READ THIS BEFORE USING A COMPARISON:
+# batch determines steps/epoch (= chunks/batch), so at the shared 500-epoch
+# cap two arms on different batches do different amounts of optimisation.
+# Which comparisons survive:
+#
+#   A2 -> A3  (l2a map)            SAME batch at every stage  -> CLEAN
+#   A1 -> A4  (attractor branch)   pretrain/adapt same; ft 96 vs 80, so A4
+#                                  gets 1.2x A1's finetune steps -> MILD
+#   A3 -> A4  (frame encoder)      144/22/144 vs 96/16/80, so A4 gets ~1.8x
+#                                  A3's finetune steps -> CONFOUNDED
+#
+# Step count has been the dominant confound in this project before (the old
+# architecture sweep ran 2.5-2.9x fewer steps than its baseline, which is
+# why none of its numbers can be used, and the sub5 result only survived
+# because steps were controlled to within 3%). So the encoder claim cannot
+# rest on A3 -> A4 while these batches differ. Either match A3 down to A4's
+# batch, or read the encoder effect off A1 -> A4's pretrain/adapt-matched
+# pair and treat the finetune leg as approximate.
+PER_ARM_BATCH = {
+    'A1': {'ft_sub10': 96},
+    'A2': {'pretrain': 144, 'adapt': 22, 'ft_sub10': 144},
+    'A3': {'pretrain': 144, 'adapt': 22, 'ft_sub10': 144},
+}
+
+
+def arm_batch(arm, stage, default):
+    """Per-arm batch for a stage, falling back to the shared default."""
+    return PER_ARM_BATCH.get(arm, {}).get(stage, default)
 
 # The shared architecture + data + optimization settings. Identical in every
 # arm and every stage unless a stage or arm override below changes it.
@@ -365,12 +419,19 @@ def _stage_paths(arm):
 def pretrain_cfg(arm):
     pre, _, _ = _stage_paths(arm)
     cfg = dict(BASE, **ARMS[arm]['cfg'])
+    batch = arm_batch(arm, 'pretrain', PRETRAIN_BATCH)
+    if batch not in PRETRAIN_NOAM:
+        raise SystemExit(
+            f'{arm} pretrain batch {batch} has no Noam entry. Add one to '
+            f'PRETRAIN_NOAM -- warmup scales inversely with batch and the '
+            f'peak LR sqrt-scales, so the schedule MUST move with the batch.')
+    model_size, warmup = PRETRAIN_NOAM[batch]
     cfg.update({
         'dev_batchsize': PRETRAIN_DEV_BATCH,
-        'train_batchsize': PRETRAIN_BATCH,
+        'train_batchsize': batch,
         'max_epochs': 100,
-        'noam_model_size': PRETRAIN_NOAM_MODEL_SIZE,
-        'noam_warmup_steps': PRETRAIN_NOAM_WARMUP_STEPS,
+        'noam_model_size': model_size,
+        'noam_warmup_steps': warmup,
         'num_frames': 600,
         'num_speakers': 2,
         'optimizer': 'noam',
@@ -386,12 +447,18 @@ def pretrain_cfg(arm):
 def adapt_cfg(arm):
     pre, adapt, _ = _stage_paths(arm)
     cfg = dict(BASE, **ARMS[arm]['cfg'])
+    batch = arm_batch(arm, 'adapt', ADAPT_BATCH)
+    if batch not in ADAPT_NOAM:
+        raise SystemExit(
+            f'{arm} adapt batch {batch} has no Noam entry. Add one to '
+            f'ADAPT_NOAM -- see the derivation beside it.')
+    model_size, warmup = ADAPT_NOAM[batch]
     cfg.update({
         'dev_batchsize': ADAPT_DEV_BATCH,
-        'train_batchsize': ADAPT_BATCH,
+        'train_batchsize': batch,
         'max_epochs': 100,
-        'noam_model_size': ADAPT_NOAM_MODEL_SIZE,
-        'noam_warmup_steps': ADAPT_NOAM_WARMUP_STEPS,
+        'noam_model_size': model_size,
+        'noam_warmup_steps': warmup,
         'num_frames': 2400,
         'num_speakers': 10,
         'optimizer': 'noam',
@@ -435,13 +502,15 @@ def finetune_cfg(arm, corpus, subsampling):
     })
     if subsampling == 10:
         cfg.update({'subsampling': 10, 'num_frames': 600,
-                    'train_batchsize': FT_BATCH_SUB10})
+                    'train_batchsize': arm_batch(arm, 'ft_sub10',
+                                                 FT_BATCH_SUB10)})
     else:
         # 1200 frames at subsampling 5 is the same 6000 raw frames (60 s) as
         # 600 at subsampling 10, and half the batch keeps tokens-per-batch
         # matched between the two, so H4 compares resolution and nothing else.
         cfg.update({'subsampling': 5, 'num_frames': 1200,
-                    'train_batchsize': FT_BATCH_SUB5})
+                    'train_batchsize': arm_batch(arm, 'ft_sub5',
+                                                 FT_BATCH_SUB5)})
     return cfg
 
 
