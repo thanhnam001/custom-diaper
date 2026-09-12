@@ -180,14 +180,23 @@ RAMC_TEST = f'{DATA}/ramc/kaldi/test'
 #   model_size = 1/(peak^2 * warmup), which is why model_size stays 512 at
 #   every batch -- a useful self-check rather than a coincidence.
 #       96  -> peak 9.882e-5*sqrt(96/32)  = 1.712e-4, warmup 66642
+#       128 -> peak 9.882e-5*sqrt(128/32) = 1.976e-4, warmup 50000. These
+#              are paperlr's OWN values -- it ran pretrain at batch 128 --
+#              and the inverse-scaling rule independently lands on 49982,
+#              which is the same number to within 0.04%. A useful check
+#              that the rule and the validated config agree.
 #       144 -> peak 9.882e-5*sqrt(144/32) = 2.096e-4, warmup 66642*96/144
 #   adapt: peak is left at the paper's RAW 9.882e-5 (not sqrt-scaled),
 #   matching paperlr's own choice at this stage.
 #       16 -> 1534/66749, warmup 27.3% of the run (39064 chunks / 16 * 100)
+#       20 -> 1921/53317, warmup 27.30% -- derived for A3, which carries the
+#             mlp map and cannot hold batch 22 (A3 OOM'd at 22 in the first
+#             dry run while A2, the same encoder with weighted_average, fit
+#             in 31.9 GB)
 #       22 -> 2111/48500, warmup 27.3% as well -- these are paperlr's own
 #             values, since paperlr ran adapt at batch 22
-PRETRAIN_NOAM = {96: (512, 66642), 144: (512, 44428)}
-ADAPT_NOAM = {16: (1534, 66749), 22: (2111, 48500)}
+PRETRAIN_NOAM = {96: (512, 66642), 128: (512, 50000), 144: (512, 44428)}
+ADAPT_NOAM = {16: (1534, 66749), 20: (1921, 53317), 22: (2111, 48500)}
 
 # Per-stage defaults, overridden per arm below.
 PRETRAIN_BATCH = 96
@@ -212,8 +221,9 @@ FT_BATCH_SUB5 = 48
 #
 #   arm  encoder    pretrain  adapt  ft sub10
 #   A1   conformer     96       16      96
-#   A2   self-attn    144       22     144
-#   A3   self-attn    144       22     144
+#   A2   self-attn    128       22     128
+#   A3   self-attn    128       20     128   <- 20 at adapt: the mlp map
+#                                              does not fit 22
 #   A4   conformer     96       16      96
 #
 # So the two conformer arms share one batch triple and the two
@@ -223,9 +233,13 @@ FT_BATCH_SUB5 = 48
 # batch determines steps/epoch (= chunks/batch), so at the shared 500-epoch
 # cap two arms on different batches do different amounts of optimisation.
 #
-#   A2 -> A3  (l2a map)          144/22/144 both  -> CLEAN
-#   A1 -> A4  (attractor branch)  96/16/96 both   -> CLEAN
-#   A3 -> A4  (frame encoder)    144/22/144 vs 96/16/96, so A4 does 1.5x
+#   A2 -> A3  (l2a map)          128/22/128 vs 128/20/128, so A3 does 1.1x
+#                                A2's ADAPT steps; pretrain and finetune are
+#                                exact -> NEARLY CLEAN. Dropping A2 to 20 as
+#                                well would restore an exact pairing for a
+#                                9% batch cut on one stage.
+#   A1 -> A4  (attractor branch)  96/16/96 both    -> CLEAN
+#   A3 -> A4  (frame encoder)    128/22/128 vs 96/16/96, so A4 does 1.33x
 #                                A3's finetune steps -> CONFOUNDED
 #
 # The two architecture-internal comparisons are now exact; only the
@@ -242,8 +256,8 @@ FT_BATCH_SUB5 = 48
 # the encoder's own attractor branch fixed) for the architecture-internal
 # half of the story.
 PER_ARM_BATCH = {
-    'A2': {'pretrain': 144, 'adapt': 22, 'ft_sub10': 144},
-    'A3': {'pretrain': 144, 'adapt': 22, 'ft_sub10': 144},
+    'A2': {'pretrain': 128, 'adapt': 22, 'ft_sub10': 128},
+    'A3': {'pretrain': 128, 'adapt': 20, 'ft_sub10': 128},
 }
 
 

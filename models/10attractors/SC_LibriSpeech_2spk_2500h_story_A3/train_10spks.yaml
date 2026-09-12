@@ -53,8 +53,8 @@ n_latents: 128
 n_sa_heads_attractors: 4
 n_selfattends_attractors: 2
 n_xa_heads_attractors: 4
-noam_model_size: 2111
-noam_warmup_steps: 48500
+noam_model_size: 1921
+noam_warmup_steps: 53317
 norm_loss_per_spk: True
 num_frames: 2400
 num_speakers: 10
@@ -68,7 +68,7 @@ seed: 3
 specaugment: False
 subsampling: 10
 time_shuffle: False
-train_batchsize: 22
+train_batchsize: 20
 train_precomputed_dir: /data/ocr/namvt17/dataset/diarization/diaper_precompute_2500h_maximum_10spks_24000frames/train
 use_frame_selfattention: True
 use_last_samples: True
